@@ -818,7 +818,7 @@ mod connection_regressions {
     #[test]
     fn reset_field_references_current_heading_and_restores_view() {
         let mut room = Room { paused:false, yaw:0., raw_yaw:0., heading_origin:0., virtual_turn:0., generation:None,
-            jump:JumpState::default(), jump_test:false, clip:"Idle_Loop", clip_speed:1., clips_seen:Vec::new(), anim:String::new(), speed:0., local:Vec2::ZERO, reason:String::new(), last_stamp:None,
+            jump:JumpState::default(), jump_test:false, clip:"Idle_Loop", clip_speed:1., clips_seen:Vec::new(), anim:String::new(), speed:0., max_walk_speed:0., max_sprint_speed:0., local:Vec2::ZERO, reason:String::new(), last_stamp:None,
             stamp_changed:Instant::now(), camera_yaw:2., camera_pitch:0.8, started:Instant::now(),
             seconds:None, parent:None, parent_check:Instant::now(), distance:5., spin:0., live_frames:0, animations_seen:vec![] };
         let mut avatar = Transform::from_xyz(3., 0., 4.);
