@@ -32,7 +32,7 @@ ArcaneVR project code is available free for noncommercial use under the [PolyFor
 
 On Windows with Rust 1.95 or newer and the required Windows C++ build tools: `cargo build --release --manifest-path slime-locomotion/rust-core/Cargo.toml --bin vrcraft`. The receiver requires SteamVR and compatible sensors for real operation. SteamVR, headset software and drivers are separate dependencies.
 
-No hardware or game compatibility is guaranteed. The release build, installation packaging and physical headset behavior need independent verification before distributing binaries.
+No hardware or game compatibility is guaranteed. The release has automated coverage, but physical headset and game behavior still require testing on your setup.
 
 ## Support
 
@@ -42,4 +42,4 @@ If you would like to support development, you can [donate via PayPal](https://pa
 
 In ArcaneVR choose **Updates → Check for updates**. The app checks this repository's published GitHub Releases, downloads a newer `ArcaneVR.exe`, verifies GitHub's SHA-256 digest, and asks you to install and restart. Source commits alone do not trigger an update.
 
-There is no published executable release yet. Maintainers can use the **Prepare executable update** workflow to build and test a draft release after increasing the version in `slime-locomotion/rust-core/Cargo.toml`. Review the draft and publish it only after verifying that the update works on an installed copy. The current updater replaces the main executable only: do not publish an executable-only update if the driver, test-room renderer, assets, or other files must also change. Such updates need a separately verified complete package.
+For a new installation, download and extract the complete Windows ZIP from [Releases](https://github.com/shentharo/ArcaneVR/releases); the standalone executable does not include the driver or test-room files. Maintainers can use the **Prepare executable update** workflow to build and test a draft release after increasing the version in `slime-locomotion/rust-core/Cargo.toml`. Review the draft and publish it only after verifying that the update works on an installed copy. The current updater replaces the main executable only: do not publish an executable-only update if the driver, test-room renderer, assets, or other files must also change. Such updates need a separately verified complete package.
