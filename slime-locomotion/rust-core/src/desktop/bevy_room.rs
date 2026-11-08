@@ -70,8 +70,9 @@ impl BevyRoom {
             return egui::Frame::new().inner_margin(32).show(ui,|ui| {
             let f=&state["feet_learning"];let stage=f["stage"].as_str().unwrap_or("");
             ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));ui.add_space(10.);ui.heading("Learn Feet Sensor");ui.add_space(12.);
+            if f["active"]==true {self.feet_requested=true;}
             if !self.feet_requested {
-                ui.label("Keep all your sensors on, both feet and your chest. Lift your left foot, then right, left, right. Then walk naturally in place for 10 steps (about 10 seconds).");
+                ui.label("Keep your chest and both foot sensors on. Fully raise and lower each foot twice, confirming each position. Then twist each foot left and right and confirm each turn. Finally walk naturally for 10 steps.");
                 ui.label("This records your own stride so walking can be customised to you. If you use KATVR, walk naturally on your walker. Your recording is saved for later.");
                 if !backend_error.is_empty(){ui.colored_label(Color32::LIGHT_RED,backend_error);}
                 if ui.add_enabled(online,egui::Button::new("Start feet calibration")).clicked(){self.feet_requested=true;return Some(json!({"command":"feet_learn_start"}));}
@@ -81,8 +82,10 @@ impl BevyRoom {
             let text=match stage {
                 "waiting"=>"Checking your sensors. Keep your chest and both foot sensors switched on.".to_owned(),
                 "prepare"=>"Preparing the next foot…".to_owned(),
-                "lift"=>format!("Lift your {side} foot.  ({} / 4)",f["step"].as_u64().unwrap_or(0)+1),
-                "lower"=>format!("Movement found. Lower your {side} foot."),
+                "lift"=>format!("Lift your {side} foot as high as you comfortably can, then confirm. ({} / 4)",f["step"].as_u64().unwrap_or(0)+1),
+                "lower"=>format!("Lower your {side} foot fully to the ground, then confirm."),
+                "twist_left"=>format!("Twist your {side} foot to the left as far as comfortable, then confirm."),
+                "twist_right"=>format!("Twist your {side} foot to the right as far as comfortable, then confirm."),
                 "ready"=>"Get ready to walk in place for 10 steps.".to_owned(),
                 "walk"=>"Walk in place for 10 steps over 10 seconds.".to_owned(),
                 "done"=>"Great! Your feet recordings were saved for later.".to_owned(),
@@ -99,9 +102,9 @@ impl BevyRoom {
             if stage=="walk"{ui.add(egui::ProgressBar::new((state["feet_learning"]["elapsed"].as_f64().unwrap_or(0.)/10.) as f32).show_percentage());}
             if let Some(message)=f["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
             if !backend_error.is_empty(){ui.colored_label(Color32::LIGHT_RED,backend_error);}
-            if stage=="lift" || stage=="lower" {
-                ui.small("If the sensor does not detect the movement, confirm it after completing the action.");
-                if ui.button(if stage=="lift"{"I lifted my foot"}else{"I lowered my foot"}).clicked(){return Some(json!({"command":"feet_learn_confirm"}));}
+            if matches!(stage,"lift" | "lower" | "twist_left" | "twist_right") {
+                ui.small("The movement is being recorded. Confirm only after you reach the position.");
+                if ui.button(match stage {"lift"=>"Foot fully raised","lower"=>"Foot fully lowered","twist_left"=>"Foot turned left",_=>"Foot turned right"}).clicked(){return Some(json!({"command":"feet_learn_confirm"}));}
             }
             if stage.is_empty() && !backend_error.is_empty() && ui.button("Retry").clicked(){self.feet_requested=false;}
             if matches!(stage,"done"|"error"|"canceled") {if ui.button("Done").clicked(){self.calibration_mode=0;self.feet_requested=false;}}

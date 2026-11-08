@@ -28,17 +28,13 @@ impl Session {
     pub fn observe(&mut self,id:&str,t:f64,kind:&str,value:Value) {
         if !self.ids.iter().any(|x|x==id) || self.stage=="waiting" {return;}
         if self.samples.len()<40000 {self.samples.push(json!({"time":t,"stage":self.stage,"step":self.step,"sensor":id,"kind":kind,"value":value}));}
-        if id!=self.sensor || kind!="rotation" {return;}
-        let Ok(q)=serde_json::from_value::<Q>(value) else{return;};
-        if self.stage=="lift" && self.baseline.is_some_and(|b|Self::angle(b,q)>8_f64.to_radians()) {
-            self.last_motion=t;self.stage="lower";
-        } else if self.stage=="lower" && !self.manual_lift && t-self.last_motion>0.4 && self.baseline.is_some_and(|b|Self::angle(b,q)<5_f64.to_radians()) {
-            self.advance(t);
-        }
+        // Record the entire movement. Only the user can mark the fully raised
+        // and fully lowered positions; a small tilt is not a completed lift.
+
     }
     pub fn advance(&mut self,t:f64) {
         self.step+=1;self.sensor.clear();self.baseline=None;self.manual_lift=false;self.started=t;
-        self.stage=if self.step>=4 {"ready"}else{"prepare"};
+        self.stage=if self.step>=6 {"ready"}else{"prepare"};
     }
 }
 impl Lab {
@@ -50,7 +46,8 @@ impl Lab {
             s.stage="waiting";s.message=if s.chest.is_empty() {"Waiting for both foot sensors. Turn them on and keep them connected."} else {"Waiting for your chest and both foot sensors. Turn them all on and keep them connected."}.into();
         } else if s.stage=="waiting" {s.stage="prepare";s.message.clear();}
         else if s.stage=="prepare" {
-            s.sensor=s.ids[s.step%2].clone();s.baseline=self.records.get(&s.sensor).map(|r|r.q);s.manual_lift=false;s.stage="lift";
+            s.sensor=s.ids[s.step%2].clone();s.baseline=self.records.get(&s.sensor).map(|r|r.q);s.manual_lift=false;s.stage=if s.step<4 {"lift"} else {"twist_left"};
+            if let Some(q)=s.baseline {s.samples.push(json!({"time":t,"stage":s.stage,"step":s.step,"sensor":s.sensor,"kind":"rotation","value":q}));}
         } else if s.stage=="ready" && t-s.started>=3. {s.started=t;s.stage="walk";s.message.clear();}
         else if s.stage=="walk" && t-s.started>=10. {
             let mut valid=true;
@@ -81,10 +78,14 @@ impl Lab {
 }
 #[cfg(test)] mod tests {
  use super::*;
- #[test] fn alternating_lifts_require_the_prompted_sensor_and_record_both() {
-  let mut s=Session::new(["left".into(),"right".into()],"chest".into());s.stage="lift";s.sensor="left".into();s.baseline=Some([1.,0.,0.,0.]);let q=[0.15_f64.cos(),0.15_f64.sin(),0.,0.];
-  s.observe("right",1.,"rotation",json!(q));assert_eq!(s.stage,"lift");s.observe("left",1.,"rotation",json!(q));assert_eq!(s.stage,"lower");
-  s.observe("left",1.6,"rotation",json!([1.,0.,0.,0.]));assert_eq!(s.stage,"prepare");assert_eq!(s.step,1);assert_eq!(s.samples.len(),3);
-  s.stage="lower";s.sensor="right".into();s.baseline=Some([1.,0.,0.,0.]);s.manual_lift=true;s.last_motion=2.;s.observe("right",3.,"rotation",json!([1.,0.,0.,0.]));assert_eq!(s.stage,"lower");
+ #[test] fn motion_never_advances_before_explicit_confirmation() {
+  let mut s=Session::new(["left".into(),"right".into()],"chest".into());
+  s.stage="lift"; s.sensor="left".into(); s.baseline=Some([1.,0.,0.,0.]);
+  let q=[0.3_f64.cos(),0.3_f64.sin(),0.,0.];
+  s.observe("left",1.,"rotation",json!(q)); s.observe("right",1.1,"rotation",json!(q));
+  assert_eq!(s.stage,"lift"); assert_eq!(s.samples.len(),2);
+  s.stage="lower"; s.observe("left",2.,"rotation",json!([1.,0.,0.,0.]));
+  assert_eq!(s.stage,"lower"); s.advance(3.);
+  assert_eq!(s.stage,"prepare"); assert_eq!(s.step,1); assert_eq!(s.samples.len(),3);
  }
 }

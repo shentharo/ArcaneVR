@@ -676,7 +676,7 @@ impl Lab {
                 let session=self.feet_learning.as_mut().ok_or("Start feet calibration first")?;
                 if !session.sensor.rsplit_once(':').is_some_and(|(ip,_)|self.peers.iter().any(|(peer,seen)|peer.ip().to_string()==ip && t>=*seen && t-*seen<2.)) {return Err("Foot sensor disconnected".into());}
                 session.samples.push(json!({"time":t,"stage":session.stage,"step":session.step,"sensor":session.sensor,"kind":"user_confirmation"}));
-                match session.stage {"lift"=>{session.manual_lift=true;session.stage="lower";session.last_motion=t;},"lower"=>session.advance(t),_=>return Err("This step does not accept confirmation".into())}
+                match session.stage {"lift"=>{session.manual_lift=true;session.stage="lower";session.last_motion=t;},"lower"=>session.advance(t),"twist_left"=>session.stage="twist_right","twist_right"=>session.advance(t),_=>return Err("This step does not accept confirmation".into())}
             },
             "crouch_learn_start" => {
                 let h=self.action_input(t).hmd.ok_or("Connect the headset before learning crouch")?;
