@@ -39,7 +39,7 @@ impl FootRig {
      let values:Vec<Quat>=samples.iter().filter(|s|s["step"].as_u64()==Some(step) && s["sensor"]==id && s["kind"]=="rotation" && (s["stage"]=="lift" || s["stage"]=="lower")).filter_map(|s|quaternion(&s["value"])).collect();
      if let Some(base)=values.first() {if let Some(peak)=values.iter().map(|q|rotation_vector(*base,*q)).max_by(|a,b|a.length_squared().total_cmp(&b.length_squared())) {if peak.length()>0.1 {vectors.push(peak);}}}
     }
-    if !vectors.is_empty() {let sum=vectors.iter().copied().fold(Vec3::ZERO,|a,b|a+b);if sum.length()>0.1 {let range=(vectors.iter().map(|v|v.length()).sum::<f32>()/vectors.len() as f32*0.16).clamp(0.07,0.2);rig.profiles.insert(mac,Reference{axis:sum.normalize(),range});}}
+    if !vectors.is_empty() {let sum=vectors.iter().copied().fold(Vec3::ZERO,|a,b|a+b);if sum.length()>0.1 {let range=(vectors.iter().map(|v|v.length()).sum::<f32>()/vectors.len() as f32).clamp(0.07,1.5);rig.profiles.insert(mac,Reference{axis:sum.normalize(),range});}}
    }
   }
   rig
@@ -100,13 +100,7 @@ impl FootRig {
   }
   if v["locomotion"]["preview"]["speed"].as_f64().is_some_and(|speed|speed>0.03) {self.last_walk_signal=Some(self.clock);}
   self.running=valid && self.last_walk_signal.is_some_and(|t|self.clock-t<0.35) && self.last_step.is_some() && self.step_interval.is_some();
-  if self.running {
-   let (side,at)=self.last_step.unwrap();
-   // Continue smoothly across a briefly missed peak; the next real foot event
-   // re-anchors the phase. Stale movement stops this path above.
-   let phase=((self.clock-at)/self.step_interval.unwrap()).clamp(0.,4.);
-   targets[side]=0.5-0.5*(std::f32::consts::PI*phase).cos();targets[1-side]=1.-targets[side];
-  }
+
   for (f,target) in self.feet.iter_mut().zip(targets) {f.height+=(target-f.height)*(1.-(-dt/0.075).exp());}
   ([self.feet[0].height,self.feet[1].height],valid)
  }

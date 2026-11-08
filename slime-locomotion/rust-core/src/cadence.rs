@@ -147,6 +147,10 @@ impl Cadence {
         if dt < MIN_INTERVAL {
             return;
         }
+        // A lift and its landing can both produce activity. Do not treat a
+        // second pulse from the same foot as a missed opposite step unless
+        // enough time has passed for a whole stride.
+        if previous==side && self.typical_interval().is_none_or(|interval| dt<interval*1.5) {return;}
         // The same foot twice usually means the other foot's step was missed.
         let interval = if previous == side { dt / 2. } else { dt };
         self.last_step = Some((t, side));
@@ -352,4 +356,13 @@ mod tests {
         assert_eq!(c.tick(1.).speed, 0.);
         assert_eq!(c.tick(0.5).speed, 0.);
     }
+}
+
+#[cfg(test)] mod speed_cap_regression {
+ use super::*;
+ #[test] fn faster_than_full_rate_never_exceeds_full_stick() {
+  let mut c=Cadence::default();
+  for n in 0..1500 {let t=n as f64*0.01;for side in 0..2 {let phase=(t-side as f64*0.2).rem_euclid(0.4);c.tilt(side,if phase<0.1{4.}else{0.},t);}let s=c.tick(t);assert!((0. ..=1.).contains(&s.speed));}
+  assert!(c.tick(14.99).speed>0.9);
+ }
 }

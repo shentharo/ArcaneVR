@@ -41,6 +41,7 @@ pub struct Sensor {
     pub q: Q,
     pub seen: f64,
     pub angular: f64,
+    rotation_seen: f64,
     ready: bool,
 }
 impl Default for Sensor {
@@ -49,6 +50,7 @@ impl Default for Sensor {
             q: IDENTITY,
             seen: -1e9,
             angular: 0.,
+            rotation_seen: -1e9,
             ready: true,
         }
     }
@@ -241,7 +243,7 @@ impl Engine {
             self.disarm();
         }
         let s = &mut self.sensors[role];
-        let dt = t - s.seen;
+        let dt = t - s.rotation_seen;
         if dt <= 0. {
             return Ok(());
         }
@@ -262,6 +264,7 @@ impl Engine {
         }
         s.q = q;
         s.seen = t;
+        s.rotation_seen = t;
         if role == 2 {
             return Ok(());
         }
@@ -719,4 +722,14 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)] mod rotation_timing_regression {
+ use super::*;
+ #[test] fn held_liveness_timestamp_cannot_amplify_real_rotation() {
+  let mut e=Engine::new(Detection::default());e.update(0,IDENTITY,1.).unwrap();
+  e.sensors[0].seen=1.019;
+  e.update(0,[(0.01_f64).cos(),0.01_f64.sin(),0.,0.],1.02).unwrap();
+  assert!((e.sensors[0].angular-1.).abs()<0.001,"{}",e.sensors[0].angular);
+ }
 }

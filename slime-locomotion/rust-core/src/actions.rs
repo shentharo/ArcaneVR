@@ -564,7 +564,7 @@ impl ActionProcessor {
         }
         let chest = angles(i);
         let head = hmd(i);
-        if self.settings.direction.enabled && chest.is_none() {
+        if (self.settings.direction.enabled || self.settings.direction.sprint_full_forward) && chest.is_none() {
             return Err("fresh chest required");
         }
         if ((self.settings.direction.enabled && self.settings.direction.decouple)
@@ -659,8 +659,14 @@ impl ActionProcessor {
         out.calibrated = true;
         let head = hmd(i);
         let chest = angles(i);
+        if let (Some(a),Some(center))=(chest,chest_center) {
+            out.chest_yaw=match (i.chest,self.chest_quaternion,self.world_up) {
+                (Some(q),Some(neutral),Some(up))=>crate::mounting::heading(q.value,neutral,up),
+                _=>Some(wrap(a[0]-center[0])),
+            };
+        }
         let d = &self.settings.direction;
-        if d.enabled {
+        if d.enabled || d.sprint_full_forward {
             let horizontal_max = d.horizontal_max_angle.unwrap_or(d.max_angle);
             let forward_max = d.forward_max_angle.unwrap_or(d.max_angle);
             out.direction_status = "missing chest";
@@ -731,13 +737,14 @@ impl ActionProcessor {
             for axis in 0..2 { self.smoothed_travel[axis] += alpha * (out.travel_xy[axis] - self.smoothed_travel[axis]); }
             out.travel_xy = self.smoothed_travel;
         } else { self.smoothed_travel = [0.; 2]; }
-        if d.enabled && d.sprint_full_forward && out.direction_status == "ready" {
+        if d.sprint_full_forward && out.direction_status == "ready" {
             let full=d.forward_max_angle.unwrap_or(d.max_angle).max(d.horizontal_max_angle.unwrap_or(d.max_angle));
             let threshold=d.sprint_angle.unwrap_or((full*1.15).min(3.14)).max(full);
             let magnitude=out.raw_direction_angles.map_or(0.,|[x,y]|x.hypot(y-d.forward_offset));
             self.sprint_active=magnitude>threshold;
         } else { self.sprint_active=false; }
         out.sprint_pressed=self.sprint_active;
+        if !d.enabled {out.travel_xy=[0.;2];}
         let j = &self.settings.jump;
         if j.enabled {
             out.jump_status = if j.source == "height" {
@@ -1193,6 +1200,13 @@ mod tests {
         assert!(out.training_xy[1]>0.03);assert!(out.travel_xy[1]>0. && out.travel_xy[1]<=0.05);
         p.settings.direction.learned_right=None;i.chest.as_mut().unwrap().value=[c,0.,0.,v];
         assert_eq!(p.process(&i).training_xy[0],0.);
+    }
+    #[test]
+    fn lean_sprint_works_without_lean_locomotion() {
+        let mut s=Settings::default();s.direction.enabled=false;s.direction.decouple=false;s.direction.sprint_full_forward=true;s.direction.max_angle=0.4;s.direction.sprint_angle=Some(0.6);s.direction.learned_forward=Some([1.,0.,0.]);s.direction.learned_right=Some([0.,0.,1.]);
+        let mut p=ActionProcessor::new(s).unwrap();p.calibrate(&input(0.)).unwrap();let mut i=input(0.1);
+        i.chest.as_mut().unwrap().value=[0.35_f64.cos(),0.35_f64.sin(),0.,0.];let out=p.process(&i);assert!(out.sprint_pressed);assert_eq!(out.travel_xy,[0.;2]);
+        i.t=1.;assert!(!p.process(&i).sprint_pressed);
     }
     #[test]
     fn sprint_ring_threshold_and_stale_release() {

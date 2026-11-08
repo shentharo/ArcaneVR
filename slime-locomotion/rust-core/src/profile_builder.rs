@@ -18,12 +18,12 @@ pub fn build(current: &Value, choices: &Value) -> Result<Value,String> {
     out["sensor_layout"]=json!({"count":if !steps || source=="chest" {1}else if thighs {5}else{3}});
     out["step_input"]=json!(source);
     if source=="chest" {out["locomotion"]["algorithm"]=json!("continuous");}
-    else if steps && source=="feet" && !lean && !sprint {out["locomotion"]["algorithm"]=json!("cadence");}
+    else if steps && source=="feet" {out["locomotion"]["algorithm"]=json!("cadence");}
     out["movement_engine"]=json!(if lean&&steps {"body_tilt_steps"} else if lean {"body_tilt"}else{"chest_heading_steps"});
     out["actions"]["direction"]["enabled"]=json!(lean);out["actions"]["direction"]["forward_only"]=json!(!backward);out["actions"]["direction"]["strafe_enabled"]=json!(strafe);out["actions"]["direction"]["max_output"]=json!(max);out["actions"]["direction"]["decouple"]=json!(false);
     if let Some(value)=obj.get("sprint_full_forward") {out["actions"]["direction"]["sprint_full_forward"]=json!(value.as_bool().ok_or("sprint_full_forward must be boolean")?);}
     out["actions"]["jump"]["enabled"]=json!(jump);if !matches!(out["actions"]["jump"]["source"].as_str(),Some("height"|"acceleration")){out["actions"]["jump"]["source"]=json!("height");}out["actions"]["crouch"]["enabled"]=json!(crouch);out["actions"]["crouch"]["use_reset_offset"]=json!(true);out["actions"]["crouch"]["mode"]=json!("hold");out["actions"]["turn"]["enabled"]=json!(head_turn);out["actions"]["turn"]["horizontal"]=json!(true);out["actions"]["turn"]["vertical"]=json!(false);
-    out["locomotion"]["settings"]["sprint_enabled"]=json!(sprint);if sprint {out["locomotion"]["algorithm"]=json!("continuous");}out["gestures"]["enabled"]=json!(false);out["output_mode"]=json!("steamvr");
+    out["locomotion"]["settings"]["sprint_enabled"]=json!(sprint);if sprint && source!="feet" {out["locomotion"]["algorithm"]=json!("continuous");}out["gestures"]["enabled"]=json!(false);out["output_mode"]=json!("steamvr");
     Ok(out)
 }
 #[cfg(test)] mod calibration_preservation {
@@ -40,7 +40,7 @@ pub fn build(current: &Value, choices: &Value) -> Result<Value,String> {
 #[cfg(test)] mod tests {use super::*;
 fn c()->Value{json!({"lean":true,"steps":false,"backward":false,"strafe":false,"jump":false,"crouch":false,"sprint":false,"thighs":false,"head_turn":false,"max_output":0.5})}
 fn current()->Value{json!({"actions":{"direction":{"learned_forward":[1,0,0],"learned_right":[0,0,1],"deadzone":0.2},"jump":{},"crouch":{},"turn":{}},"locomotion":{"algorithm":"alternating","settings":{}},"gestures":{}})}
-#[test] fn derives_modes_and_preserves_axes(){let mut x=c();let a=build(&current(),&x).unwrap();assert_eq!(a["sensor_layout"]["count"],1);assert_eq!(a["actions"]["direction"]["learned_right"],json!([0,0,1]));assert_eq!(a["actions"]["direction"]["deadzone"],0.2);x["steps"]=json!(true);x["thighs"]=json!(true);x["sprint"]=json!(true);let b=build(&current(),&x).unwrap();assert_eq!(b["movement_engine"],"body_tilt_steps");assert_eq!(b["sensor_layout"]["count"],5);assert_eq!(b["locomotion"]["algorithm"],"continuous");assert_eq!(b["locomotion"]["settings"]["sprint_enabled"],true);x["lean"]=json!(false);x["thighs"]=json!(false);let b=build(&current(),&x).unwrap();assert_eq!(b["movement_engine"],"chest_heading_steps");assert_eq!(b["sensor_layout"]["count"],3);}
+#[test] fn derives_modes_and_preserves_axes(){let mut x=c();let a=build(&current(),&x).unwrap();assert_eq!(a["sensor_layout"]["count"],1);assert_eq!(a["actions"]["direction"]["learned_right"],json!([0,0,1]));assert_eq!(a["actions"]["direction"]["deadzone"],0.2);x["steps"]=json!(true);x["thighs"]=json!(true);x["sprint"]=json!(true);let b=build(&current(),&x).unwrap();assert_eq!(b["movement_engine"],"body_tilt_steps");assert_eq!(b["sensor_layout"]["count"],5);assert_eq!(b["locomotion"]["algorithm"],"cadence");assert_eq!(b["locomotion"]["settings"]["sprint_enabled"],true);x["lean"]=json!(false);x["thighs"]=json!(false);let b=build(&current(),&x).unwrap();assert_eq!(b["movement_engine"],"chest_heading_steps");assert_eq!(b["sensor_layout"]["count"],3);}
 #[test] fn rejects_incompatible_and_nontyped(){let mut x=c();x["lean"]=json!(false);assert!(build(&current(),&x).is_err());x["steps"]=json!(true);x["strafe"]=json!(true);assert!(build(&current(),&x).is_err());x=c();x["sprint"]=json!(true);assert!(build(&current(),&x).is_err());x=c();x["jump"]=json!(1);assert!(build(&current(),&x).is_err());x=c();x["max_output"]=json!(0.01);assert!(build(&current(),&x).is_err());}}
 
 #[cfg(test)] mod walking_sources {

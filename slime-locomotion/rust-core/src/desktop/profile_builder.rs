@@ -29,7 +29,7 @@ impl ProfileBuilder{
      if !d.lean{d.backward=false;d.strafe=false;}
      cols[0].add_enabled_ui(d.lean,|ui|{self.dirty|=ui.checkbox(&mut d.backward,"Allow backward movement").changed();self.dirty|=ui.checkbox(&mut d.strafe,"Lean left / right to strafe").changed();});
      cols[1].label(RichText::new("ACTIONS").color(Color32::from_rgb(87,219,218)).strong());
-     cols[1].add_enabled_ui(d.lean,|ui|{self.dirty|=ui.checkbox(&mut d.sprint_full_forward,"Sprint past sprint ring").changed();});
+     cols[1].add_enabled_ui(d.lean||d.feet_steps,|ui|{self.dirty|=ui.checkbox(&mut d.sprint_full_forward,if d.feet_steps {"Lean to sprint"} else {"Sprint past sprint ring"}).changed();});
      self.dirty|=cols[1].checkbox(&mut d.jump,"Jump (uses sensor calibration)").changed();
      self.dirty|=cols[1].add_enabled(s["hmd_pose"]["fresh"]==true,egui::Checkbox::new(&mut d.crouch,"Crouch with headset height")).on_hover_text("Connect the headset to configure crouch.").changed();
      if !d.steps && !d.feet_steps{d.sprint=false;} if !d.feet_steps {d.thighs=false;}

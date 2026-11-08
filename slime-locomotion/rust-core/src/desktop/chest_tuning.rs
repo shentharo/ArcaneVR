@@ -111,7 +111,7 @@ fn output_meter(state:&Value, online:bool, fresh:bool)->Option<OutputMeter> {
  Some(OutputMeter {x:axis(0)?, y:axis(1)?, sprint:output["buttons"].as_u64()? & 4 != 0, armed:output["armed"].as_bool()?})
 }
 pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,state:&Value,online:bool,fresh:bool,details:bool)->bool {
- let mut changed=check(ui,d,"sprint_full_forward","Sprint");
+ let mut changed=check(ui,d,"sprint_full_forward",if state["step_input"]=="feet" {"Lean to sprint"}else{"Sprint"});
  let mut full_x=d["horizontal_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full_y=d["forward_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full=full_x.max(full_y);let mut sprint=d["sprint_angle"].as_f64().unwrap_or((full*1.15).min(3.14)).max(full);
@@ -161,8 +161,12 @@ pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,
  ellipse(d["horizontal_max_angle"].as_f64().unwrap_or(full),d["forward_max_angle"].as_f64().unwrap_or(full),green);
  let fp=c+egui::vec2(0.707,-0.707)*(radius*(full/view) as f32);p.circle_filled(fp,7.,green);p.text(fp+egui::vec2(10.,-9.),egui::Align2::LEFT_BOTTOM,"Full speed",egui::FontId::proportional(12.),green);
  if d["sprint_full_forward"]==true {ellipse(sprint,sprint,purple);let sp=c+egui::vec2(0.707,0.707)*(radius*(sprint/view) as f32);p.circle_filled(sp,7.,purple);p.text(sp+egui::vec2(10.,9.),egui::Align2::LEFT_TOP,"Sprint",egui::FontId::proportional(12.),purple);}
- for (offset,label) in [(egui::vec2(0.,-radius-13.),"FORWARD"),(egui::vec2(0.,radius+13.),"BACK"),(egui::vec2(-radius-15.,0.),"L"),(egui::vec2(radius+15.,0.),"R")] {p.text(c+offset,egui::Align2::CENTER_CENTER,label,egui::FontId::proportional(11.),MUTED);}
+ for (offset,label) in [(egui::vec2(48.,-radius-13.),"FORWARD"),(egui::vec2(35.,radius+13.),"BACK"),(egui::vec2(-radius-15.,20.),"L"),(egui::vec2(radius+15.,20.),"R")] {p.text(c+offset,egui::Align2::CENTER_CENTER,label,egui::FontId::proportional(11.),MUTED);}
  if let Some([x,y])=adjusted_angles(preview,_saved,fresh){let vector=egui::vec2((x/view) as f32,-(y/view) as f32);let point=c+vector/vector.length().max(1.)*radius;p.line_segment([c,point],Stroke::new(2.,CYAN));p.circle_filled(point,6.,CYAN);}
+ if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64().filter(|v|v.is_finite()) {
+  let radial=egui::vec2(yaw.sin() as f32,-yaw.cos() as f32);let tangent=egui::vec2(-radial.y,radial.x);let tip=c+radial*(radius+10.);let base=c+radial*(radius+22.);
+  p.add(egui::Shape::convex_polygon(vec![tip,base+tangent*6.,base-tangent*6.],CYAN,Stroke::NONE));
+ }}
  let yc=egui::pos2(area.right()-28.,area.top()+26.);p.circle_stroke(yc,18.,Stroke::new(1.,MUTED));
  if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64(){p.line_segment([yc,yc+egui::vec2(yaw.sin() as f32,-yaw.cos() as f32)*15.],Stroke::new(2.,CYAN));}}
  p.text(yc+egui::vec2(0.,23.),egui::Align2::CENTER_TOP,"YAW",egui::FontId::proportional(10.),MUTED);

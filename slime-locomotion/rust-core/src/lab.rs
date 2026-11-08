@@ -1610,7 +1610,7 @@ impl Lab {
         let speed = if self.movement_engine == "body_tilt" || self.engine.cfg.chest_steps {
             1.
         } else {
-            if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{self.engine.speed}
+            if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{if self.engine.armed {self.engine.speed}else{self.engine.preview.speed}}
         };
         self.travel_xy = if !direction_ready {
             [0.; 2]
@@ -1619,7 +1619,7 @@ impl Lab {
                 .travel_xy
                 .map(|x| x * speed * self.action_preview.speed_multiplier)
         } else {
-            [0., speed * self.action_preview.speed_multiplier]
+            [0., speed * self.action_preview.speed_multiplier * self.actions.settings().direction.max_output]
         };
         if self.engine.cfg.chest_steps && self.walking_model.is_object() {
 
@@ -1631,6 +1631,7 @@ impl Lab {
             | (((self.action_preview.crouch_pressed || self.gesture_preview.crouch) as u32) << 1)
             | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.engine.cfg.motion.sprint_enabled && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
         if self.engine.cfg.chest_steps && self.walking_speed<=0. {self.output_buttons &= !4;}
+        if self.engine.cfg.require_steps && !self.engine.cfg.chest_steps && self.engine.preview.speed<=0.01 {self.output_buttons &= !4;}
         if self.engine.armed && !direction_ready {
             self.travel_xy = [0.; 2];
         }
@@ -1797,7 +1798,7 @@ impl Lab {
         let scale = if self.movement_engine == "body_tilt" || self.engine.cfg.chest_steps {
             1.
         } else {
-            if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{self.engine.speed}
+            if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{if self.engine.armed {self.engine.speed}else{self.engine.preview.speed}}
         };
         self.travel_xy = if is_tilt && self.action_preview.direction_status != "ready" {
             [0.; 2]
@@ -1806,7 +1807,7 @@ impl Lab {
                 .travel_xy
                 .map(|x| x * scale * self.action_preview.speed_multiplier)
         } else {
-            [0., scale * self.action_preview.speed_multiplier]
+            [0., scale * self.action_preview.speed_multiplier * self.actions.settings().direction.max_output]
         };
         if self.engine.cfg.chest_steps && self.walking_model.is_object() {
             if let Some([x,y])=self.action_preview.raw_direction_angles.filter(|a|a[1].abs()>0.05) {
@@ -1825,6 +1826,7 @@ impl Lab {
             | (((self.action_preview.crouch_pressed || self.gesture_preview.crouch) as u32) << 1)
             | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.engine.cfg.motion.sprint_enabled && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
         if self.engine.cfg.chest_steps && self.walking_speed<=0. {self.output_buttons &= !4;}
+        if self.engine.cfg.require_steps && !self.engine.cfg.chest_steps && self.engine.preview.speed<=0.01 {self.output_buttons &= !4;}
         let active = self.output_mode == "steamvr"
             && !self.demo
             && self.engine.armed
