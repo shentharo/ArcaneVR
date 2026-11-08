@@ -63,7 +63,8 @@ class RestartProbe {
                 time.sleep(0.05)
             self.assertTrue(observed.exists(), "Updated executable did not produce its startup report")
             lines = observed.read_text(encoding="utf-8-sig").splitlines()
-            self.assertEqual(Path(lines[0]), original_working_directory)
+            # Windows may report the 8.3 short form (RUNNER~1) of the same folder.
+            self.assertEqual(os.path.realpath(lines[0]), os.path.realpath(original_working_directory))
             self.assertEqual(lines[1:], ["--config", config_name, expected_config])
             self.assertEqual((original_working_directory / config_name).read_text(), expected_config)
 
