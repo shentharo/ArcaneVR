@@ -1,6 +1,12 @@
 name: Prepare executable update
+# Publishing paths:
+#   - Push to main with a Cargo.toml version that has no release yet: tests, builds and
+#     PUBLISHES that version, so the in-app updater offers it. Pushes whose version is
+#     already released stop at the first step.
+#   - Pushed v*.*.* tag or manual run: builds a DRAFT release to verify before publishing.
 on:
   push:
+    branches: [main]
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
@@ -14,34 +20,64 @@ on:
         default: false
 permissions:
   contents: write
+concurrency:
+  group: arcanevr-release
+  cancel-in-progress: false
 jobs:
   prepare:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check version and update scope
+      - name: Plan release
+        id: plan
         shell: pwsh
         env:
-          # A pushed release tag is the confirmation for tag-triggered builds.
-          RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
-          EXECUTABLE_ONLY: ${{ github.event_name == 'push' && 'true' || inputs.executable_only }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_EXECUTABLE_ONLY: ${{ inputs.executable_only }}
         run: |
-          if ($env:EXECUTABLE_ONLY -ne 'true') { throw 'Confirm executable-only compatibility before preparing an update.' }
-          $version = $env:RELEASE_VERSION -replace '^v',''
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be three numeric components.' }
           $cargo = Get-Content slime-locomotion/rust-core/Cargo.toml -Raw
-          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"\r\n]+)"' -or $Matches[1] -ne $version) { throw 'Version must match Cargo.toml.' }
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"\r\n]+)"') { throw 'Cannot read the version from Cargo.toml.' }
+          $cargoVersion = $Matches[1]
+          $publish = 'false'
+          if ($env:EVENT -eq 'push' -and $env:REF_TYPE -eq 'branch') {
+            # A new version on main is the release request. Its tests and embedded-renderer check gate publication.
+            $version = $cargoVersion; $publish = 'true'; $executableOnly = 'true'
+          } elseif ($env:EVENT -eq 'push') {
+            # A pushed release tag is the confirmation for tag-triggered builds.
+            $version = $env:REF_NAME -replace '^v',''; $executableOnly = 'true'
+          } else {
+            $version = $env:INPUT_VERSION; $executableOnly = $env:INPUT_EXECUTABLE_ONLY
+          }
+          if ($executableOnly -ne 'true') { throw 'Confirm executable-only compatibility before preparing an update.' }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be three numeric components.' }
+          if ($cargoVersion -ne $version) { throw 'Version must match Cargo.toml.' }
+          $skip = 'false'
+          if ($publish -eq 'true') {
+            gh release view "v$version" *> $null
+            if ($LASTEXITCODE -eq 0) { $skip = 'true'; Write-Host "v$version is already released; nothing to do." }
+            $global:LASTEXITCODE = 0
+          }
+          "version=$version", "publish=$publish", "skip=$skip" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.plan.outputs.skip != 'true'
       - name: Test
+        if: steps.plan.outputs.skip != 'true'
         run: cargo test --release --manifest-path slime-locomotion/rust-core/Cargo.toml --lib --bins
       - name: Test update installer
+        if: steps.plan.outputs.skip != 'true'
         run: python slime-locomotion/rust-core/tests/test_update_install.py
       - name: Build Test Room renderer
+        if: steps.plan.outputs.skip != 'true'
         working-directory: slime-locomotion/bevy-test-room
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           cargo build --release --locked
       - name: Build
+        if: steps.plan.outputs.skip != 'true'
         shell: pwsh
         run: |
           $renderer = Resolve-Path slime-locomotion/bevy-test-room/target/release/arcane-test-room.exe
@@ -53,14 +89,19 @@ jobs:
           if ($app -le $viewer) { throw 'The Test Room renderer was not embedded in the application.' }
           Write-Host "Embedded renderer ($viewer bytes) in application ($app bytes)."
           Get-FileHash slime-locomotion/rust-core/target/release/vrcraft.exe -Algorithm SHA256
-      - name: Create draft release
+      - name: Create release
+        if: steps.plan.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          PUBLISH: ${{ steps.plan.outputs.publish }}
           RELEASE_TARGET: ${{ github.sha }}
         run: |
-          $env:RELEASE_VERSION = $env:RELEASE_VERSION -replace '^v',''
           Copy-Item slime-locomotion/rust-core/target/release/vrcraft.exe ArcaneVR.exe
-          gh release create "v$env:RELEASE_VERSION" ArcaneVR.exe --target "$env:RELEASE_TARGET" --draft --title "ArcaneVR v$env:RELEASE_VERSION" --notes "Draft: verify update installation, component compatibility and release notes before publication."
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
+          if ($env:PUBLISH -eq 'true') {
+            gh release create "v$env:RELEASE_VERSION" ArcaneVR.exe --target "$env:RELEASE_TARGET" --latest --title "ArcaneVR v$env:RELEASE_VERSION" --notes "Built and tested automatically from commit $($env:RELEASE_TARGET.Substring(0,7)). The Test Room renderer is embedded."
+          } else {
+            gh release create "v$env:RELEASE_VERSION" ArcaneVR.exe --target "$env:RELEASE_TARGET" --draft --title "ArcaneVR v$env:RELEASE_VERSION" --notes "Draft: verify update installation, component compatibility and release notes before publication."
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release.' }
