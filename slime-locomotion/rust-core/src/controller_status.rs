@@ -1,12 +1,19 @@
 //! Read-only OpenVR background client, owned by the receiver thread.
 use std::{ffi::{c_char,c_void},time::{Instant,Duration},path::PathBuf};
 include!(concat!(env!("OUT_DIR"),"/system_abi.rs"));
+/// Use the shipped OpenVR client, which discovers the user's registered runtime.
+/// The development fallback allows running directly from Cargo's target directory.
+pub(crate) fn openvr_library_path() -> Result<PathBuf, String> {
+ let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+ let root = executable.parent().ok_or("Executable directory unavailable")?;
+ [root.join("openvr_api.dll"), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../openvr/bin/win64/openvr_api.dll")]
+  .into_iter().find(|path| path.is_file()).ok_or_else(|| "OpenVR runtime library unavailable".into())
+}
 struct Session { _library:libloading::Library, system:*const System, shutdown:unsafe extern "C" fn() }
 impl Drop for Session {fn drop(&mut self){unsafe{(self.shutdown)()}}}
 impl Session {
  fn connect()->Result<Self,String>{unsafe{
-  let root=std::env::current_exe().map_err(|e|e.to_string())?.parent().unwrap().to_path_buf();
-  let path=[root.join("openvr_api.dll"),PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../openvr/bin/win64/openvr_api.dll")].into_iter().find(|p|p.is_file()).ok_or("OpenVR runtime library unavailable")?;
+  let path=openvr_library_path()?;
   let library=libloading::Library::new(path).map_err(|e|e.to_string())?;
   let init=*library.get::<unsafe extern "C" fn(*mut i32,i32)->u32>(b"VR_InitInternal\0").map_err(|e|e.to_string())?;
   let shutdown=*library.get::<unsafe extern "C" fn()>(b"VR_ShutdownInternal\0").map_err(|e|e.to_string())?;

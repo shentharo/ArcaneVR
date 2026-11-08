@@ -54,6 +54,7 @@ catch {{ if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -e
 }
 fn stage(release: &Release) -> Result<PathBuf, String> {
     let target = std::env::current_exe().map_err(|e| e.to_string())?;
+    let restart_working_directory = std::env::current_dir().map_err(|e| format!("Cannot preserve the application's working directory: {e}"))?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
     let folder = target.parent().ok_or("Executable directory unavailable")?.join(".arcane-update").join(format!("{}-{stamp}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("Cannot stage update beside installed executable: {e}"))?;
@@ -80,7 +81,7 @@ $ticks=(Get-Process -Id {}).StartTime.ToUniversalTime().Ticks
     let details: Value = serde_json::from_str(&output).map_err(|e| e.to_string())?;
     let request = folder.join("request.json");
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let data = json!({"target":target, "sha256":release.sha256, "original_sha256":details["original"], "parent_pid":std::process::id(), "parent_start_ticks":details["ticks"], "restart_args":args});
+    let data = json!({"target":target, "sha256":release.sha256, "original_sha256":details["original"], "parent_pid":std::process::id(), "parent_start_ticks":details["ticks"], "restart_args":args, "restart_working_directory":restart_working_directory});
     std::fs::write(&request, serde_json::to_vec_pretty(&data).unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(folder.join("install.ps1"), INSTALLER).map_err(|e| e.to_string())?;
     Ok(request)

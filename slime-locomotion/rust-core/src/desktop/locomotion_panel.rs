@@ -20,6 +20,7 @@ pub struct LocomotionPanel {
     last_sample: f64,
     history_source: String,
     raw_history: Vec<[f32; 3]>,
+    graph_drag_ceiling: Option<f32>,
 }
 impl Default for LocomotionPanel {
     fn default() -> Self {
@@ -33,6 +34,7 @@ impl Default for LocomotionPanel {
             last_sample: -1.,
             history_source: String::new(),
             raw_history: vec![],
+            graph_drag_ceiling: None,
         }
     }
 }
@@ -232,7 +234,11 @@ impl LocomotionPanel {
             #[cfg(test)] ui.ctx().data_mut(|data|data.insert_temp(egui::Id::new("test_graph_rect"),rect));
             let painter=ui.painter_at(rect);painter.rect_filled(rect,6.,pages::BG);
             let peak=self.history.iter().flatten().copied().fold(0.,f32::max);
-            let ceiling=(self.settings.sprint_threshold.max(self.settings.max_signal).max(self.settings.threshold) as f32*1.25).max(peak*1.05).max(1.);
+            // Keep both the axis and pointer mapping fixed for the whole drag.
+            // Re-scaling from the draft each frame makes a held pointer feed its
+            // own changes back into the threshold (and live signal peaks do too).
+            if !ui.input(|i|i.pointer.any_down()) {self.graph_drag_ceiling=None;}
+            let ceiling=self.graph_drag_ceiling.unwrap_or_else(||(self.settings.sprint_threshold.max(self.settings.max_signal).max(self.settings.threshold) as f32*1.25).max(peak*1.05).max(1.));
             for f in [0.25,0.5,0.75] {let y=rect.bottom()-f*height;painter.line_segment([egui::pos2(rect.left(),y),egui::pos2(rect.right(),y)],Stroke::new(1.,Color32::from_rgb(45,55,68)));}
             for (i,color) in [MUTED.gamma_multiply(0.6), CYAN, VIOLET, MINT, AMBER].into_iter().enumerate() {
                 let points=self.history.iter().enumerate().map(|(n,v)|egui::pos2(rect.right()-(self.history.len()-1-n) as f32*rect.width()/159.,rect.bottom()-(v[i]/ceiling).clamp(0.,1.)*height)).collect::<Vec<_>>();
@@ -245,6 +251,7 @@ impl LocomotionPanel {
                 let point=egui::pos2(rect.left()+12.,y.clamp(rect.top()+10.,rect.bottom()-10.));
                 let hit=egui::Rect::from_center_size(point,egui::vec2(24.,24.));
                 let response=ui.interact(hit,ui.id().with(("step_threshold",index)),egui::Sense::drag());
+                if response.drag_started() {self.graph_drag_ceiling=Some(ceiling);}
                 painter.circle_filled(point,8.,color);painter.circle_stroke(point,10.,Stroke::new(1.,Color32::WHITE));
                 painter.text(egui::pos2(point.x+16.,y-3.),egui::Align2::LEFT_BOTTOM,if index==2&&!self.settings.sprint_enabled {"Sprint (off)"} else {label},egui::FontId::proportional(13.),color);
                 painter.text(egui::pos2(rect.right()-4.,y-3.),egui::Align2::RIGHT_BOTTOM,format!("{value:.1}"),egui::FontId::proportional(13.),color);
@@ -335,6 +342,25 @@ impl LocomotionPanel {
 
 #[cfg(test)] mod tests {
  use super::*;
+ #[test] fn held_sprint_drag_keeps_value_and_scale_stable() {
+  let ctx=egui::Context::default();let mut panel=LocomotionPanel::default();let settings=Settings::default();
+  let state=json!({"step_input":"chest","locomotion":{"algorithm":"continuous","settings":settings.to_json(),"diagnostic":{"status":"waiting"}}});
+  let frame=|panel:&mut LocomotionPanel,events:Vec<egui::Event>,time:f64| {let input=egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(900.,900.))),events,time:Some(time),..Default::default()};let _=ctx.run(input,|ctx|{egui::CentralPanel::default().show(ctx,|ui|{panel.show_test_graph(ui,&state,true,false);});});};
+  frame(&mut panel,vec![],0.);
+  let rect=ctx.data(|d|d.get_temp::<egui::Rect>(egui::Id::new("test_graph_rect"))).unwrap();
+  let ceiling=settings.sprint_threshold as f32*1.25;
+  let start=egui::pos2(rect.left()+12.,rect.bottom()-rect.height()*0.8);
+  let end=egui::pos2(start.x,rect.bottom()-rect.height()*0.9);
+  let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+  frame(&mut panel,vec![egui::Event::PointerMoved(start),button(start,true)],0.1);
+  frame(&mut panel,vec![egui::Event::PointerMoved(end)],0.2);
+  let dragged=panel.settings.sprint_threshold;
+  assert!((dragged-0.9*ceiling as f64).abs()<0.001);
+  for n in 0..60 {frame(&mut panel,vec![],0.3+n as f64/60.);}
+  assert!((panel.settings.sprint_threshold-dragged).abs()<0.001,"stationary held pointer changed {dragged} to {}",panel.settings.sprint_threshold);
+  frame(&mut panel,vec![button(end,false)],1.5);
+  assert!((panel.settings.sprint_threshold-dragged).abs()<0.001);
+ }
  #[test] fn real_graph_handles_drag_and_apply() {
   let ctx=egui::Context::default();let mut panel=LocomotionPanel::default();let settings=Settings::default();
   let state=json!({"step_input":"chest","locomotion":{"algorithm":"continuous","settings":settings.to_json(),"diagnostic":{"status":"waiting"}}});

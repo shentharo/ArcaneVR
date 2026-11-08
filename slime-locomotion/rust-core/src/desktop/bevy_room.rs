@@ -15,6 +15,8 @@ pub struct BevyRoom {
     calibration_mode: u8,
     feet_requested: bool,
     qa_calibration_opened: bool,
+    qa_controls_started: Option<Instant>,
+    qa_controls_stage: u8,
     #[cfg(windows)] window: Option<isize>,
     #[cfg(windows)] shown: bool,
     #[cfg(windows)] last_rect: Option<(i32, i32, i32, i32)>,
@@ -22,7 +24,19 @@ pub struct BevyRoom {
 }
 impl BevyRoom {
     pub fn sensor_calibration_open(&self) -> bool { self.sensor_calibration.open || self.calibration_mode!=0 }
-    pub fn start_sensor_calibration(&mut self, _state: &Value) { self.sensor_calibration.open=false;self.calibration_mode=1;self.feet_requested=false; }
+    pub fn start_sensor_calibration(&mut self, _state: &Value) {
+        self.retire_viewer();
+        self.sensor_calibration.open=false;self.calibration_mode=1;self.feet_requested=false;
+    }
+    fn retire_viewer(&mut self) {
+        // Calibration menus have no native viewport. Retire the normal viewer
+        // too, so returning to Test reloads newly saved foot calibration files.
+        self.stop();
+        self.calibration_preview=false;
+        self.attempted=false;
+        self.retry_after=None;
+        self.page_visible=false;
+    }
     pub fn open_qa_calibration(&mut self) {
         if !self.qa_calibration_opened && std::env::args().any(|arg| arg == "--qa-feet-calibration") {
             self.qa_calibration_opened=true;self.calibration_mode=4;self.feet_requested=false;return;
@@ -37,7 +51,7 @@ impl BevyRoom {
     }
     pub fn show_sensor_calibration(&mut self, ui:&mut egui::Ui, state:&Value, port:u16, frame:&eframe::Frame, allow_spawn:bool, backend_error:&str, online:bool) -> Option<Value> {
         if self.calibration_mode==1 {
-            self.stop_calibration_preview();
+            self.retire_viewer();
             egui::Frame::new().inner_margin(32).show(ui,|ui| {
                 ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));
                 ui.add_space(10.);ui.heading("What would you like to calibrate?");ui.add_space(8.);
@@ -52,7 +66,7 @@ impl BevyRoom {
             });return None;
         }
         if self.calibration_mode==4 {
-            self.stop_calibration_preview();
+            self.retire_viewer();
             return egui::Frame::new().inner_margin(32).show(ui,|ui| {
             let f=&state["feet_learning"];let stage=f["stage"].as_str().unwrap_or("");
             ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));ui.add_space(10.);ui.heading("Learn Feet Sensor");ui.add_space(12.);
@@ -166,6 +180,34 @@ impl BevyRoom {
             }
         }
     }
+    /// Opt-in runtime QA, using the same command pipe and calibration lifecycle
+    /// as the UI. Returns true when the owner should navigate back to Test.
+    pub fn poll_qa_controls(&mut self) -> bool {
+        if std::env::var_os("ARCANEVR_EMBED_QA").is_none()
+            || std::env::var_os("ARCANEVR_EMBED_QA_CONTROLS").is_none() {return false;}
+        #[cfg(windows)]
+        if self.qa_controls_started.is_none() && self.shown {
+            self.qa_controls_started=Some(Instant::now());
+        }
+        let Some(started)=self.qa_controls_started else {return false;};
+        let at=started.elapsed().as_secs_f32();
+        let (due,event)=match self.qa_controls_stage {
+            0=>(2.,"qa_pause"),1=>(3.,"qa_resume"),2=>(4.,"qa_reset"),
+            3=>(5.,"qa_calibration_menu"),4=>(6.,"qa_feet_page"),5=>(7.,"qa_return_to_test"),
+            _=>return false,
+        };
+        if at<due {return false;}
+        #[cfg(windows)] if let Some(hwnd)=self.window {self.report(hwnd,event);}
+        match self.qa_controls_stage {
+            0=>self.send("pause"),1=>self.send("resume"),2=>self.send("reset"),
+            3=>self.start_sensor_calibration(&Value::Null),
+            4=>{self.calibration_mode=4;self.feet_requested=false;},
+            5=>{self.calibration_mode=0;self.feet_requested=false;},
+            _=>{},
+        }
+        self.qa_controls_stage+=1;
+        self.qa_controls_stage==6
+    }
     fn start(&mut self, port: u16) -> Result<(), String> {
         if self.child.is_some() { return Ok(()); }
         let (exe, assets) = Self::paths()?;
@@ -205,6 +247,7 @@ impl BevyRoom {
         #[cfg(windows)] if !visible { self.hide(); }
     }
     pub fn stop(&mut self) {
+        #[cfg(windows)] self.hide();
         self.send("quit"); self.stdin = None;
         if let Some(mut child) = self.child.take() {
             let (tx,rx)=std::sync::mpsc::channel(); self.stopping=Some(rx);
@@ -222,6 +265,9 @@ impl BevyRoom {
     }
     /// `allow_spawn` must be false for normal QA captures; opt in explicitly for embedding QA.
     pub fn show(&mut self, ui: &mut egui::Ui, state: &Value, port: u16, frame: &eframe::Frame, allow_spawn: bool, online: bool) -> Option<Value> {
+        // The header can open calibration after page visibility was computed.
+        // Do not respawn the normal viewer in the rest of that same frame.
+        if self.sensor_calibration_open() {self.set_page_visible(false);return None;}
         self.stop_calibration_preview();
         let mut command = None;
         if !self.sensor_calibration.open && !self.sensor_calibration.notice().is_empty() { ui.colored_label(Color32::YELLOW,self.sensor_calibration.notice()); }
@@ -316,6 +362,29 @@ impl BevyRoom {
     }
 }
 impl Drop for BevyRoom { fn drop(&mut self) { self.stop(); } }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_menu_retires_normal_viewer_for_fresh_foot_profiles() {
+        let mut room=BevyRoom::default();
+        let (tx,rx)=std::sync::mpsc::sync_channel(8);
+        room.stdin=Some(tx);
+        room.attempted=true;
+        room.page_visible=true;
+        room.retry_after=Some(Instant::now()+Duration::from_secs(3));
+        room.start_sensor_calibration(&json!({}));
+        assert_eq!(rx.try_recv().ok().as_deref(),Some("quit"),"retire the old viewer before calibration changes its profiles");
+        assert!(room.stdin.is_none());
+        assert!(!room.attempted,"returning to Test must spawn a fresh viewer");
+        assert!(!room.page_visible,"the old native child must not cover the menu");
+        assert!(room.retry_after.is_none());
+        assert!(room.sensor_calibration_open());
+        assert_eq!(room.calibration_mode,1);
+    }
+}
 
 #[cfg(windows)]
 mod win {

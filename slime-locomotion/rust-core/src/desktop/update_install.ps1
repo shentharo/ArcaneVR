@@ -11,6 +11,10 @@ $installed = $false
 try {
     $expectedRoot = Join-Path (Split-Path -Parent $target) '.arcane-update'
     if ((Split-Path -Parent $stage) -ine $expectedRoot -or [IO.Path]::GetExtension($target) -ine '.exe') { throw 'Invalid update destination' }
+    # Preserve relative --config paths. Older staged requests retain their original fallback.
+    $restartDirectory = Split-Path -Parent $target
+    if ($r.restart_working_directory) { $restartDirectory = [IO.Path]::GetFullPath([string]$r.restart_working_directory) }
+    if (!$NoRestart -and !(Test-Path -LiteralPath $restartDirectory -PathType Container)) { throw 'Original working directory is no longer available' }
     if (Test-Path -LiteralPath $backup) { throw 'Recovery file already exists' }
     if ($r.sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid expected checksum' }
     if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ine $r.sha256) { throw 'Downloaded file checksum mismatch' }
@@ -36,7 +40,7 @@ try {
             $arg = [string]$_
             '"' + ([regex]::Replace([regex]::Replace($arg, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
         })
-        $launch = @{FilePath=$target; WorkingDirectory=(Split-Path -Parent $target); WindowStyle='Normal'; PassThru=$true}
+        $launch = @{FilePath=$target; WorkingDirectory=$restartDirectory; WindowStyle='Normal'; PassThru=$true}
         if ($quoted.Count -gt 0) { $launch.ArgumentList = ($quoted -join ' ') }
         Start-Process @launch | Out-Null
     }

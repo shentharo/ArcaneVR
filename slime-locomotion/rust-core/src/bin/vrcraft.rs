@@ -322,6 +322,7 @@ impl eframe::App for ArcaneVR {
         let skinned_home = self.page == pages::Page::Home;
         if qa_capture::path().is_none(){self.overlays.poll();}
         self.bevy_room.poll();
+        if self.bevy_room.poll_qa_controls(){self.page=pages::Page::TestRoom;}
         if std::env::var_os("ARCANEVR_EMBED_QA_NAVIGATE").is_some() && qa_capture::path().is_some() {
             match ctx.cumulative_frame_nr() {
                 60=>ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.,900.))),
@@ -847,7 +848,7 @@ impl eframe::App for ArcaneVR {
     }
 }
 fn launch_steam_tool(key:&std::ffi::CStr)->Result<(),String>{unsafe {
- let dll=std::path::PathBuf::from("C:/Program Files (x86)/Steam/steamapps/common/SteamVR/bin/win64/openvr_api.dll");
+ let dll=receiver::controller_status::openvr_library_path()?;
  let lib=libloading::Library::new(dll).map_err(|e|e.to_string())?;
  let init=*lib.get::<unsafe extern "C" fn(*mut i32,i32)->u32>(b"VR_InitInternal\0").map_err(|e|e.to_string())?;
  let shutdown=*lib.get::<unsafe extern "C" fn()>(b"VR_ShutdownInternal\0").map_err(|e|e.to_string())?;

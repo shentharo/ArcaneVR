@@ -793,7 +793,7 @@ fn exit_checks(
     let elapsed=room.started.elapsed().as_secs_f32();
     if let Some(path)=launch.series.clone() {if elapsed-launch.last_series>=0.1 {
         if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _=writeln!(file,"{}",serde_json::json!({"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
+            let _=writeln!(file,"{}",serde_json::json!({"position":[avatar.single().translation.x,avatar.single().translation.y,avatar.single().translation.z],"speed_mps":room.speed,"paused":room.paused,"distance_m":room.distance,"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
         }
         launch.last_series=elapsed;
     }}

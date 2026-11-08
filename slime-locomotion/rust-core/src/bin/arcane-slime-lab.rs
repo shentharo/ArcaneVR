@@ -1,6 +1,6 @@
 //! Portable Rust workbench. Tracker UDP is LAN-facing; UI and Nexus mock stay local.
 #[path = "../controller_status.rs"]
-mod controller_status;
+pub(crate) mod controller_status;
 use arcane_bridge_core::{lab::Lab, parse_command, Command, Sessions};
 use serde_json::{json, Value};
 use std::{

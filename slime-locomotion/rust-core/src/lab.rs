@@ -1629,7 +1629,7 @@ impl Lab {
         self.output_buttons = ((self.action_preview.jump_pressed || self.gesture_preview.jump)
             as u32)
             | (((self.action_preview.crouch_pressed || self.gesture_preview.crouch) as u32) << 1)
-            | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.actions.settings().direction.sprint_full_forward && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
+            | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.engine.cfg.motion.sprint_enabled && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
         if self.engine.cfg.chest_steps && self.walking_speed<=0. {self.output_buttons &= !4;}
         if self.engine.armed && !direction_ready {
             self.travel_xy = [0.; 2];
@@ -1823,7 +1823,7 @@ impl Lab {
         self.output_buttons = ((self.action_preview.jump_pressed || self.gesture_preview.jump)
             as u32)
             | (((self.action_preview.crouch_pressed || self.gesture_preview.crouch) as u32) << 1)
-            | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.actions.settings().direction.sprint_full_forward && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
+            | (((self.engine.preview.sprint || self.gesture_preview.sprint || self.action_preview.sprint_pressed || (self.engine.cfg.chest_steps && self.engine.cfg.motion.sprint_enabled && self.walking_effort>=1.2 && self.walking_speed>0.)) as u32) << 2);
         if self.engine.cfg.chest_steps && self.walking_speed<=0. {self.output_buttons &= !4;}
         let active = self.output_mode == "steamvr"
             && !self.demo
@@ -2237,6 +2237,68 @@ mod tests {
         assert!(restored.command(&json!({"command":"game_profile_apply","game_id":"invalid"}),6.).is_err());
         assert!(!restored.engine.armed);
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn chest_walking_sprint_switches_independently_control_preview_and_packets() {
+        for walking_sprint in [false, true] {
+            for ring_sprint in [false, true] {
+                for past_ring in [false, true] {
+                    for fast_walk in [false, true] {
+                        let mut l=Lab::new(PathBuf::from("nonexistent-chest-sprint-switches-fixture.json")).unwrap();
+                        l.output_mode="steamvr".into();l.protocol_v2=true;
+                        l.movement_engine="body_tilt_steps".into();
+                        l.engine.cfg.require_steps=false;l.engine.cfg.chest_steps=true;
+                        l.engine.cfg.motion.sprint_enabled=walking_sprint;
+                        l.mapping[2]="10.0.0.1:0".into();
+                        let identity="02:00:00:00:00:01:0";
+                        l.peer_macs.insert("10.0.0.1".into(),"02:00:00:00:00:01".into());
+                        l.learned_mounting_identity=Some(identity.into());
+                        l.walking_model=json!({"identity":identity,"rate":if fast_walk {0.1}else{10.},"full_speed_effort":1.});
+                        let mut settings=crate::actions::Settings::default();
+                        settings.direction.enabled=true;settings.direction.decouple=false;
+                        settings.direction.smoothing_ms=0.;settings.direction.max_angle=0.4;
+                        settings.direction.sprint_angle=Some(0.6);
+                        settings.direction.sprint_full_forward=ring_sprint;
+                        settings.direction.learned_forward=Some([1.,0.,0.]);
+                        settings.direction.learned_right=Some([0.,1.,0.]);
+                        l.actions=crate::actions::ActionProcessor::new(settings).unwrap();
+                        l.records.insert(l.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});
+                        l.engine.update(2,crate::gait::IDENTITY,1.).unwrap();
+                        l.command(&json!({"command":"calibrate"}),1.).unwrap();
+                        // Supply repeated lateral walking sway while holding a known forward lean.
+                        // No acceleration samples: the legacy acceleration detector cannot cause sprint.
+                        for n in 0..=150 {
+                            let t=1.+n as f64/100.;
+                            l.walking_signal.add(t,0.05*(t*16.).sin());
+                        }
+                        let t=2.5_f64;
+                        let lateral=0.05*(t*16.).sin();
+                        let forward=if past_ring {0.8_f64}else{0.2};
+                        let angle=forward.hypot(lateral);
+                        let scale=(angle/2.).sin()/angle;
+                        let q=[(angle/2.).cos(),forward*scale,lateral*scale,0.];
+                        l.records.get_mut(&l.mapping[2]).unwrap().q=q;
+                        l.records.get_mut(&l.mapping[2]).unwrap().seen=t;
+                        l.engine.update(2,q,t).unwrap();
+                        l.tick(t,0.);
+                        assert!(l.walking_speed>0.);
+                        assert_eq!(l.walking_effort>=1.2,fast_walk);
+                        let expected=(walking_sprint && fast_walk)||(ring_sprint && past_ring);
+                        let case=format!("walking={walking_sprint}, ring={ring_sprint}, fast={fast_walk}, past_ring={past_ring}");
+                        assert_eq!(l.output_buttons&4!=0,expected,"preview: {case}");
+                        l.ack_seen=t;l.ack_flags=7;l.neutral_pending=false;l.steam_retry_since=Some(t);
+                        let unarmed=l.steam_packet(t);
+                        assert_eq!(u32::from_le_bytes(unarmed[28..32].try_into().unwrap())&4,0);
+                        l.engine.armed=true;
+                        let packet=l.steam_packet(t);
+                        assert_eq!(u32::from_le_bytes(packet[28..32].try_into().unwrap())&4!=0,expected,"packet: {case}");
+                        l.command(&json!({"command":"stop"}),t).unwrap();
+                        let stopped=l.steam_packet(t);
+                        assert_eq!(u32::from_le_bytes(stopped[28..32].try_into().unwrap())&4,0);
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn full_lean_sprint_is_only_sent_when_armed_and_fresh() {
