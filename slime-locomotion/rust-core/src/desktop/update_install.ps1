@@ -14,7 +14,14 @@ try {
     # Preserve relative --config paths. Older staged requests retain their original fallback.
     $restartDirectory = Split-Path -Parent $target
     if ($r.restart_working_directory) { $restartDirectory = [IO.Path]::GetFullPath([string]$r.restart_working_directory) }
-    if (!$NoRestart -and !(Test-Path -LiteralPath $restartDirectory -PathType Container)) { throw 'Original working directory is no longer available' }
+    # If the original folder is gone, still install the update but do not restart: launching
+    # from another folder could resolve a relative --config path to the wrong settings file.
+    $restart = !$NoRestart
+    $note = $null
+    if ($restart -and !(Test-Path -LiteralPath $restartDirectory -PathType Container)) {
+        $restart = $false
+        $note = 'Updated; not restarted because the original working directory is no longer available. Start ArcaneVR again.'
+    }
     if (Test-Path -LiteralPath $backup) { throw 'Recovery file already exists' }
     if ($r.sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid expected checksum' }
     if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ine $r.sha256) { throw 'Downloaded file checksum mismatch' }
@@ -33,7 +40,7 @@ try {
     Move-Item -LiteralPath $candidate -Destination $target
     $installed = $true
     if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ine $r.sha256) { throw 'Installed file checksum mismatch' }
-    if (!$NoRestart) {
+    if ($restart) {
         # Arguments are written by ArcaneVR, never taken from release metadata.
         # Windows quoting escapes trailing backslashes and embedded quotes.
         $quoted = @($r.restart_args | ForEach-Object {
@@ -44,7 +51,7 @@ try {
         if ($quoted.Count -gt 0) { $launch.ArgumentList = ($quoted -join ' ') }
         Start-Process @launch | Out-Null
     }
-    @{status='installed'; target=$target; backup=$backup; sha256=$r.sha256} | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
+    @{status='installed'; target=$target; backup=$backup; sha256=$r.sha256; note=$note} | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
 } catch {
     $message = $_.Exception.Message
     if ($moved) {

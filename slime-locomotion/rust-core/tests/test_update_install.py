@@ -67,6 +67,35 @@ class RestartProbe {
             self.assertEqual(lines[1:], ["--config", config_name, expected_config])
             self.assertEqual((original_working_directory / config_name).read_text(), expected_config)
 
+    def test_missing_original_working_directory_installs_without_restarting(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-missing-cwd-test-") as temporary:
+            root = Path(temporary)
+            install = root / "installed app"
+            stage = install / ".arcane-update" / "test"
+            stage.mkdir(parents=True)
+            old = b"MZ" + b"old" * 50
+            new = b"MZ" + b"new" * 50
+            target = install / "VRCraft.exe"
+            target.write_bytes(old)
+            (stage / "candidate.exe").write_bytes(new)
+            request = {"target": str(target), "sha256": hashlib.sha256(new).hexdigest(),
+                       "original_sha256": hashlib.sha256(old).hexdigest(),
+                       "parent_pid": 0, "parent_start_ticks": 0,
+                       "restart_working_directory": str(root / "deleted folder"),
+                       "restart_args": ["--config", "relative.json"]}
+            request_path = stage / "request.json"
+            request_path.write_text(json.dumps(request))
+            env = {k: v for k, v in os.environ.items() if k.lower() != "psmodulepath"}
+            completed = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive",
+                                        "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
+                                        "-Request", str(request_path)], env=env,
+                                       capture_output=True, text=True, timeout=15)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(target.read_bytes(), new, "update was not installed")
+            result = json.loads((stage / "result.json").read_text(encoding="utf-8-sig"))
+            self.assertEqual(result["status"], "installed")
+            self.assertIn("not restarted", result["note"])
+
     def test_install_checksums_preservation_and_rollback(self):
         with tempfile.TemporaryDirectory(prefix="arcane-updater-test-") as temporary:
             root = Path(temporary)
