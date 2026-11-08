@@ -1,6 +1,28 @@
 # ArcaneVR / VRCraft
 
-Windows VR locomotion software using SlimeVR-compatible sensors and SteamVR. Experimental: hardware and game compatibility vary; verify calibration and stopping before use.
+I was frustrated that the VR movement options I tried did not match what I wanted, so I decided to create my own. My aim is to make movement feel natural and give people control over how it works.
+
+I started with **one SlimeVR-compatible chest sensor** to get the foundations working. One-sensor movement is working really well for me so far. Three sensors are a straightforward setup to build toward, and I will continue working on support for foot sensors. The app also has layouts for three and five sensors, but those modes are still under development and need more real-world testing.
+
+## Features so far
+
+- **One-sensor locomotion:** lean to move, move backwards or strafe, with adjustable direction and sensitivity.
+- **Walking in place:** learn the left/right chest sway of walking with one sensor, adjust the effort needed to reach full walking speed, and save the learned pattern.
+- **Sprint controls:** enable sprint and tune the lean threshold; faster walking effort can also trigger sprint in one-sensor mode.
+- **Movement tuning:** adjust the deadzone, full-speed and sprint rings, response and smoothing.
+- **Test room:** preview movement and see live sensor and direction information before enabling game output.
+- **Calibration:** guided chest sensor mounting calibration and a recenter control; jump and crouch learning and tuning are also available.
+- **Sensor setup:** assign sensors to body positions, see connection status and use the USB Wi-Fi setup for compatible SlimeVR trackers.
+- **Profiles:** save, load, import and export movement settings locally, including game-specific profiles. Community profiles are not available yet.
+- **SteamVR integration:** a virtual locomotion device, controller and headset status, and an optional dashboard overlay. Game compatibility and bindings vary.
+- **Three- and five-sensor layouts:** selectable in the app; foot-based walking and additional sensor support remain a work in progress.
+- **Updates:** check for published GitHub releases from the app. See the update limitations below.
+
+This is an experimental project. My experience with one sensor is encouraging, but hardware, tracking and game behavior vary. Please test calibration, direction and stopping with your setup.
+
+## Development
+
+I expect updates to be frequent while the project is developing—possibly daily or weekly—and less frequent, perhaps monthly, as it matures. These are intentions, not a fixed release schedule. Feedback and reports are welcome.
 
 ## License
 
