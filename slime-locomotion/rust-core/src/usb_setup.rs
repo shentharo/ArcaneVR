@@ -745,11 +745,11 @@ mod tests {
     #[test]
     fn real_tracker_info_mac_and_ip_unset_are_not_stale() {
         let mut state=SetupState::default();
-        consume_line(&mut state,"[INFO ] [SerialCommands] SlimeVR Tracker, board: 22, address: 10.0.0.191, mac: 02:00:00:82:6C:63, status: 0, wifi state: 5");
-        assert_eq!(state.device_id.as_deref(),Some("02:00:00:82:6C:63"));
+        consume_line(&mut state,"[INFO ] [SerialCommands] SlimeVR Tracker, board: 22, address: 10.0.0.191, mac: 1C:8F:57:82:6C:63, status: 0, wifi state: 5");
+        assert_eq!(state.device_id.as_deref(),Some("1C:8F:57:82:6C:63"));
         remember_connection(&mut state);
         assert_eq!(state.completed[0].1.to_string(),"10.0.0.191");
-        consume_line(&mut state,"SlimeVR Tracker, address: (IP unset), mac: 02:00:00:82:6C:63, status: 0");
+        consume_line(&mut state,"SlimeVR Tracker, address: (IP unset), mac: 1C:8F:57:82:6C:63, status: 0");
         assert!(state.address.is_none());
         assert_eq!(state.completed.len(),1);
     }

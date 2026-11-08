@@ -208,11 +208,11 @@ mod tests {
  use arcane_bridge_core::usb_setup::SetupState;
  use serde_json::json;
  #[test] fn live_tracker_overrides_old_timeout_and_rejects_stale_or_other_identity() {
-  let mut state=SetupState::default(); state.address=Some("192.0.2.12".parse().unwrap());state.device_id=Some("AA:BB".into());state.auto_status="Timed out".into();
-  let live=json!({"trackers":[{"id":"192.0.2.12:0","mac":"AA:BB","age_ms":10.}]});
+  let mut state=SetupState::default(); state.address=Some("10.0.0.12".parse().unwrap());state.device_id=Some("AA:BB".into());state.auto_status="Timed out".into();
+  let live=json!({"trackers":[{"id":"10.0.0.12:0","mac":"AA:BB","age_ms":10.}]});
   assert!(tracker_live(&state,&live,true));assert!(tracker_status(&state,true).0.starts_with("Connected"));
   assert!(!tracker_live(&state,&live,false));
-  assert!(!tracker_live(&state,&json!({"trackers":[{"id":"192.0.2.12:0","mac":"CC:DD","age_ms":10.}]}),true));
-  assert!(!tracker_live(&state,&json!({"trackers":[{"id":"192.0.2.12:0","mac":"AA:BB","age_ms":1500.}]}),true));
+  assert!(!tracker_live(&state,&json!({"trackers":[{"id":"10.0.0.12:0","mac":"CC:DD","age_ms":10.}]}),true));
+  assert!(!tracker_live(&state,&json!({"trackers":[{"id":"10.0.0.12:0","mac":"AA:BB","age_ms":1500.}]}),true));
  }
 }

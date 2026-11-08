@@ -57,6 +57,17 @@ use std::{
 fn usb_qa() -> bool {
     qa_capture::path().is_some() || std::env::args().any(|arg| arg == "--qa-usb-setup")
 }
+fn game_button_clickable(test_page:bool,armed:bool,online:bool,busy:bool,calibration_open:bool,can_enable:bool)->bool {
+    if test_page {armed || (online && !busy && !calibration_open)} else {armed || can_enable}
+}
+#[cfg(test)]
+#[test]
+fn test_page_button_does_not_flicker_with_foot_freshness() {
+    assert!(game_button_clickable(true,false,true,false,false,false));
+    assert!(game_button_clickable(true,false,true,false,false,true));
+    assert!(!game_button_clickable(false,false,true,false,false,false));
+    assert!(!game_button_clickable(true,false,false,false,false,true));
+}
 
 #[derive(Default, Clone)]
 struct Status {
@@ -142,6 +153,7 @@ struct ArcaneVR {
     test_settings_tab: usize,
     show_hints: bool,
     show_movement_preview: bool,
+    test_auto_center: Option<Instant>,
     debug: bool,
     network_open: bool,
     network_ips: [String; 3],
@@ -248,6 +260,7 @@ impl ArcaneVR {
             profile_builder:profile_builder::ProfileBuilder::default(),
             new_setup:qa_capture::page().as_deref()!=Some("setup-old"),
             new_test:qa_capture::page().as_deref()!=Some("test-old"),
+            test_auto_center:None,
             http_port:port,
             bevy_room:bevy_room::BevyRoom::default(),
             avatar_texture:None,
@@ -452,8 +465,7 @@ impl eframe::App for ArcaneVR {
                             self.walking = false;
                             self.send(json!({"command":"calibrate"}));
                         }
-                        let tilt = s["movement_engine"] == "body_tilt" || s["movement_engine"] == "body_tilt_steps";
-                        if ui.add_enabled(status.online && !busy && tilt, egui::Button::new("Calibration")).clicked() {
+                        if ui.add_enabled(status.online && !busy, egui::Button::new("Calibration")).clicked() {
                             self.walking = false;
                             self.send(json!({"command":"stop"}));
                             self.bevy_room.start_sensor_calibration(s);
@@ -472,7 +484,11 @@ impl eframe::App for ArcaneVR {
                     let can_enable = ready && !busy && !self.bevy_room.sensor_calibration_open() && s["calibrated"] == true && driver_ready && actions_output_ready && s["locomotion"]["input_ready"] == true;
                     let movement_button = egui::Button::new("Game movement")
                         .fill(if enabled { pages::ORANGE } else { pages::CARD });
-                    if ui.add_enabled(enabled || can_enable, movement_button).clicked() {
+                    // Test is a preview page. Keep this control visually stable while
+                    // foot packets briefly age; the receiver still checks every arm
+                    // prerequisite at the moment the user clicks it.
+                    let can_click=game_button_clickable(self.page==Page::TestRoom,enabled,status.online,busy,self.bevy_room.sensor_calibration_open(),can_enable);
+                    if ui.add_enabled(can_click, movement_button).clicked() {
                         if !enabled { self.send(json!({"command":"arm"})); } else { self.walking=false; self.test_room.stop(); self.send(json!({"command":"stop"})); }
                     }
                     if ui.selectable_label(matches!(self.page, Page::QuickSetup | Page::Devices), "Sensors").clicked() { self.page = Page::QuickSetup; }
@@ -684,6 +700,13 @@ impl eframe::App for ArcaneVR {
                 },
                 pages::Page::Profiles=>{if let Some(command)=self.action_pages.profiles(ui,s,status.online){self.walking=false;self.send(json!({"command":"stop"}));self.send(command);}},
                 pages::Page::TestRoom=>{
+                    if !status.error.is_empty(){ui.colored_label(Color32::YELLOW,&status.error);}
+                    if status.online && !busy && s["mode"]=="live" && s["armed"]==false && s["calibration_ready"]==true
+                        && (s["calibrated"]!=true || s["actions"]["preview"]["calibrated"]!=true)
+                        && s["feet_learning"]["active"]!=true && (s["sensor_calibration"].is_null() || matches!(s["sensor_calibration"]["stage"].as_str(),Some("done"|"canceled")))
+                        && self.test_auto_center.is_none_or(|at|at.elapsed()>Duration::from_secs(2)) {
+                        self.test_auto_center=Some(Instant::now());self.send(json!({"command":"calibrate"}));
+                    }
                     if s["step_input"]=="chest" {
                         if s["walking_learned"]!=true {
                             ui.colored_label(pages::ORANGE,"Learn walking first: forward movement requires a saved walking pattern for this chest sensor.");

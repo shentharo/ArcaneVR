@@ -60,14 +60,23 @@ fn stage(release: &Release) -> Result<PathBuf, String> {
     let candidate = folder.join("candidate.exe");
     let output = run_ps(&format!(r#"
 $ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -UseBasicParsing -Uri {} -OutFile {} -TimeoutSec 120
-$f=Get-Item -LiteralPath {}; if($f.Length -ne {}){{throw 'Download size mismatch'}}
-$hash=(Get-FileHash -LiteralPath {} -Algorithm SHA256).Hash
-if($hash -ine {}){{throw 'Download checksum mismatch'}}
+$url={}; $candidate={}; $expectedSize={}; $expectedHash={}
+$downloadError=$null
+for($attempt=0; $attempt -lt 3; $attempt++) {{
+    try {{
+        $downloadUrl = if ($attempt -eq 0) {{ $url }} else {{ $url + '?arcane_retry=' + [guid]::NewGuid().ToString('N') }}
+        Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $candidate -TimeoutSec 120
+        $f=Get-Item -LiteralPath $candidate; if($f.Length -ne $expectedSize){{throw 'Download size mismatch'}}
+        $hash=(Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+        if($hash -ine $expectedHash){{throw 'Download checksum mismatch'}}
+        $downloadError=$null; break
+    }} catch {{ $downloadError=$_.Exception.Message; if ($attempt -lt 2) {{ Start-Sleep -Seconds 2 }} }}
+}}
+if($downloadError){{throw "Download failed after retries: $downloadError"}}
 $original=(Get-FileHash -LiteralPath {} -Algorithm SHA256).Hash
 $ticks=(Get-Process -Id {}).StartTime.ToUniversalTime().Ticks
 @{{original=$original;ticks=$ticks}} | ConvertTo-Json -Compress
-"#, literal(&release.executable_url), literal(&candidate.to_string_lossy()), literal(&candidate.to_string_lossy()), release.size, literal(&candidate.to_string_lossy()), literal(&release.sha256), literal(&target.to_string_lossy()), std::process::id()))?;
+"#, literal(&release.executable_url), literal(&candidate.to_string_lossy()), release.size, literal(&release.sha256), literal(&target.to_string_lossy()), std::process::id()))?;
     let details: Value = serde_json::from_str(&output).map_err(|e| e.to_string())?;
     let request = folder.join("request.json");
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -126,4 +135,22 @@ impl Updater {
         Ok(())
     }
     pub fn error(&mut self, error: String) { self.message=error; }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    #[test]
+    #[ignore = "downloads the public release for updater integration QA"]
+    fn stages_real_release_with_verified_checksum() {
+        let release = Release {
+            version: "1.1.5".into(),
+            executable_url: "https://github.com/shentharo/ArcaneVR/releases/download/v1.1.5/ArcaneVR.exe".into(),
+            sha256: "fc2f74eec8a702faefae5364e0e2c2dc1b87bd25c66d70ebde5e16a741921fa0".into(),
+            notes_url: "https://github.com/shentharo/ArcaneVR/releases/tag/v1.1.5".into(),
+            size: 70119424,
+        };
+        let request = stage(&release).expect("release download and verification");
+        assert!(request.exists());
+    }
 }

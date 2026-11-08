@@ -3,6 +3,7 @@ use eframe::egui::{self, Color32};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{json, Value};
 use std::{io::Write, path::PathBuf, process::{Child, Command, Stdio}, time::{Duration, Instant}};
+const BUNDLED_VIEWER:&[u8]=include_bytes!(concat!(env!("OUT_DIR"),"/embedded-test-room.exe"));
 
 #[derive(Default)]
 pub struct BevyRoom {
@@ -11,6 +12,8 @@ pub struct BevyRoom {
     attempted: bool, paused: bool, page_visible: bool,
     calibration_preview: bool,
     sensor_calibration: crate::sensor_calibration::SensorCalibration,
+    calibration_mode: u8,
+    feet_requested: bool,
     qa_calibration_opened: bool,
     #[cfg(windows)] window: Option<isize>,
     #[cfg(windows)] shown: bool,
@@ -18,18 +21,84 @@ pub struct BevyRoom {
     #[cfg(windows)] parent_window: Option<isize>,
 }
 impl BevyRoom {
-    pub fn sensor_calibration_open(&self) -> bool { self.sensor_calibration.open }
-    pub fn start_sensor_calibration(&mut self, state: &Value) { self.sensor_calibration.start_with_state(state); }
+    pub fn sensor_calibration_open(&self) -> bool { self.sensor_calibration.open || self.calibration_mode!=0 }
+    pub fn start_sensor_calibration(&mut self, _state: &Value) { self.sensor_calibration.open=false;self.calibration_mode=1;self.feet_requested=false; }
     pub fn open_qa_calibration(&mut self) {
+        if !self.qa_calibration_opened && std::env::args().any(|arg| arg == "--qa-feet-calibration") {
+            self.qa_calibration_opened=true;self.calibration_mode=4;self.feet_requested=false;return;
+        }
+        if !self.qa_calibration_opened && std::env::args().any(|arg| arg == "--qa-calibration-menu") {
+            self.qa_calibration_opened=true;self.calibration_mode=1;return;
+        }
         if !self.qa_calibration_opened && std::env::args().any(|arg| arg == "--qa-sensor-calibration") {
             self.qa_calibration_opened=true;
             self.sensor_calibration.start();
         }
     }
     pub fn show_sensor_calibration(&mut self, ui:&mut egui::Ui, state:&Value, port:u16, frame:&eframe::Frame, allow_spawn:bool, backend_error:&str, online:bool) -> Option<Value> {
+        if self.calibration_mode==1 {
+            self.stop_calibration_preview();
+            egui::Frame::new().inner_margin(32).show(ui,|ui| {
+                ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));
+                ui.add_space(10.);ui.heading("What would you like to calibrate?");ui.add_space(8.);
+                ui.label("Full calibration runs chest calibration, then learns each foot.");ui.add_space(20.);
+                let button=|label| egui::Button::new(egui::RichText::new(label).size(17.).color(Color32::WHITE)).fill(Color32::from_rgb(33,67,81));
+                if ui.add_sized([280.,52.],button("Full calibration")).clicked() {self.calibration_mode=3;self.sensor_calibration.start_with_state(state);}
+                ui.add_space(8.);
+                if ui.add_sized([280.,52.],button("Chest calibration")).clicked() {self.calibration_mode=2;self.sensor_calibration.start_with_state(state);}
+                ui.add_space(8.);
+                if ui.add_sized([280.,52.],button("Feet calibration")).clicked() {self.calibration_mode=4;self.feet_requested=false;}
+                ui.add_space(16.);if ui.button("Cancel").clicked(){self.calibration_mode=0;}
+            });return None;
+        }
+        if self.calibration_mode==4 {
+            self.stop_calibration_preview();
+            return egui::Frame::new().inner_margin(32).show(ui,|ui| {
+            let f=&state["feet_learning"];let stage=f["stage"].as_str().unwrap_or("");
+            ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));ui.add_space(10.);ui.heading("Learn Feet Sensor");ui.add_space(12.);
+            if !self.feet_requested {
+                ui.label("Keep both foot sensors on. Lift left, right, left, right, then walk in place. The recordings are saved for later.");
+                if !backend_error.is_empty(){ui.colored_label(Color32::LIGHT_RED,backend_error);}
+                if ui.add_enabled(online,egui::Button::new("Start feet calibration")).clicked(){self.feet_requested=true;return Some(json!({"command":"feet_learn_start"}));}
+                if ui.button("Back").clicked(){self.calibration_mode=1;}return None;
+            }
+            let side=if f["step"].as_u64().unwrap_or(0)%2==0 {"left"}else{"right"};
+            let text=match stage {
+                "waiting"=>"Checking both foot sensors. Keep both switched on.".to_owned(),
+                "prepare"=>"Preparing the next foot…".to_owned(),
+                "lift"=>format!("Lift your {side} foot.  ({} / 4)",f["step"].as_u64().unwrap_or(0)+1),
+                "lower"=>format!("Movement found. Lower your {side} foot."),
+                "ready"=>"Get ready to walk in place for 10 steps.".to_owned(),
+                "walk"=>"Walk in place for 10 steps over 10 seconds.".to_owned(),
+                "done"=>"Great! Your feet recordings were saved for later.".to_owned(),
+                "error"=>"The recordings could not be saved.".to_owned(),
+                "canceled"=>"Feet calibration canceled.".to_owned(),
+                _=>"Starting feet calibration…".to_owned(),
+            };
+            ui.label(egui::RichText::new(text).size(23.).strong());
+            if stage=="ready" || stage=="walk" {
+                ui.add_space(10.);
+                ui.label("We’re recording your natural walking style to help customise movement later. Walk as you want to walk in the game. If you use KATVR, walk on your walker.");
+            }
+            if stage=="ready"{let elapsed=f["elapsed"].as_f64().unwrap_or(0.);ui.label(egui::RichText::new(format!("Starting in {}",(3.-elapsed).ceil().max(1.) as u32)).size(20.));}
+            if stage=="walk"{ui.add(egui::ProgressBar::new((state["feet_learning"]["elapsed"].as_f64().unwrap_or(0.)/10.) as f32).show_percentage());}
+            if let Some(message)=f["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
+            if !backend_error.is_empty(){ui.colored_label(Color32::LIGHT_RED,backend_error);}
+            if stage=="lift" || stage=="lower" {
+                ui.small("If the sensor does not detect the movement, confirm it after completing the action.");
+                if ui.button(if stage=="lift"{"I lifted my foot"}else{"I lowered my foot"}).clicked(){return Some(json!({"command":"feet_learn_confirm"}));}
+            }
+            if stage.is_empty() && !backend_error.is_empty() && ui.button("Retry").clicked(){self.feet_requested=false;}
+            if matches!(stage,"done"|"error"|"canceled") {if ui.button("Done").clicked(){self.calibration_mode=0;self.feet_requested=false;}}
+            else if ui.button("Cancel").clicked(){self.calibration_mode=0;self.feet_requested=false;return Some(json!({"command":"feet_learn_cancel"}));}
+            ui.ctx().request_repaint_after(Duration::from_millis(100));None
+            }).inner;
+        }
         let (command,rect)=self.sensor_calibration.show(ui, state, backend_error, online);
         if !self.sensor_calibration.open {
             self.stop_calibration_preview();
+            if self.calibration_mode==3 && state["sensor_calibration"]["stage"]=="done" && state["sensor_calibration"]["saved_file"].is_string() {self.calibration_mode=4;self.feet_requested=false;}
+            else {self.calibration_mode=0;}
             return command;
         }
         if !self.calibration_preview {
@@ -62,16 +131,29 @@ impl BevyRoom {
             self.attempted=false;
         }
     }
-    fn paths() -> Option<(PathBuf, PathBuf)> {
-        let root = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    fn paths() -> Result<(PathBuf, PathBuf),String> {
+        let root = std::env::current_exe().map_err(|e|e.to_string())?.parent().ok_or("No application directory")?.to_path_buf();
         let installed = root.join("bevy-test-room");
         let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bevy-test-room");
+        if !BUNDLED_VIEWER.is_empty() {
+            let assets=[installed.join("assets"),dev.join("assets")].into_iter().find(|p|p.join("character.glb").is_file()).ok_or("Test Room assets are missing")?;
+            let dir=root.join(".arcane-runtime");std::fs::create_dir_all(&dir).map_err(|e|format!("Cannot create renderer directory: {e}"))?;
+            let exe=dir.join(format!("arcane-test-room-{}-{}.exe",env!("CARGO_PKG_VERSION"),env!("ARCANEVR_RENDERER_ID")));
+            let matches=std::fs::read(&exe).is_ok_and(|v|v==BUNDLED_VIEWER);
+            if !matches {
+                let tmp=dir.join(format!("arcane-test-room-{}-{}.tmp",env!("CARGO_PKG_VERSION"),std::process::id()));
+                std::fs::write(&tmp,BUNDLED_VIEWER).map_err(|e|format!("Cannot stage Test Room: {e}"))?;
+                if exe.exists(){return Err("Installed Test Room file does not match this update".into());}
+                std::fs::rename(&tmp,&exe).map_err(|e|format!("Cannot install Test Room: {e}"))?;
+            }
+            return Ok((exe,assets));
+        }
         for base in [installed, dev] {
             for exe in [base.join("bin/arcane-test-room.exe"), base.join("target/release/arcane-test-room.exe")] {
-                if exe.is_file() { return Some((exe, base.join("assets"))); }
+                if exe.is_file() { return Ok((exe, base.join("assets"))); }
             }
         }
-        None
+        Err("Bevy movement viewer is not installed".into())
     }
     pub fn poll(&mut self) {
         if self.stopping.as_ref().is_some_and(|rx| !matches!(rx.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty))) { self.stopping=None; }
@@ -85,16 +167,21 @@ impl BevyRoom {
     }
     fn start(&mut self, port: u16) -> Result<(), String> {
         if self.child.is_some() { return Ok(()); }
-        let (exe, assets) = Self::paths().ok_or("Bevy movement viewer is not installed")?;
+        let (exe, assets) = Self::paths()?;
         let log = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("No executable directory")?.join("bevy-test-room.log");
         let file = std::fs::File::create(log).map_err(|e| e.to_string())?;
         let mut cmd = Command::new(exe);
+        let foot_calibration_dir=std::env::current_exe().map_err(|e|e.to_string())?.parent().ok_or("No executable directory")?.join("feet-calibrations");
         cmd.args(["--embedded", "--http-port", &port.to_string(), "--parent-pid", &std::process::id().to_string(), "--asset-root", &assets.to_string_lossy()])
+            .arg("--foot-calibration-dir").arg(foot_calibration_dir)
             .stdin(Stdio::piped()).stdout(Stdio::from(file.try_clone().map_err(|e| e.to_string())?)).stderr(Stdio::from(file));
         if self.calibration_preview {cmd.arg("--calibration-preview");}
         if std::env::var_os("ARCANEVR_EMBED_QA").is_some() {
             if let Some(path) = std::env::var_os("ARCANEVR_VIEWER_QA_SCREENSHOT") { cmd.arg("--screenshot").arg(path); }
+            if let Some(at) = std::env::var_os("ARCANEVR_VIEWER_QA_CAPTURE_AT") { cmd.arg("--qa-capture-at").arg(at); }
             if let Some(path) = std::env::var_os("ARCANEVR_VIEWER_QA_REPORT") { cmd.arg("--qa-report").arg(path); }
+            if let Some(path) = std::env::var_os("ARCANEVR_VIEWER_QA_SERIES") { cmd.arg("--qa-series").arg(path); }
+            if let Some(at) = std::env::var_os("ARCANEVR_VIEWER_QA_REPORT_AFTER") { cmd.arg("--qa-report-after").arg(at); }
         }
         #[cfg(windows)] { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -150,7 +237,7 @@ impl BevyRoom {
         if state["hmd_pose"]["fresh"] != true {
             ui.colored_label(Color32::from_rgb(237,188,119), "Headset disconnected · chest-only test. Connect the headset and recenter for headset controls.");
         }
-        ui.label(if state["step_input"]=="chest" {"Stand upright and Reset Center. Lean to steer; walk in place to move forward. Learn walking in Steps first."} else {"Stand upright and Reset Center before moving. Lean to move; turn your body to change facing."});
+        ui.label(if state["step_input"]=="chest" {"Centering is automatic when the sensor is ready. Lean to steer; walk in place to move forward."} else if state["movement_engine"]=="chest_heading_steps" {"Centering is automatic when sensors are ready. Turn your chest to face a direction; walk in place to move."} else {"Centering is automatic when sensors are ready. Lean to move; turn your chest to change facing."});
         if self.child.is_some() { ui.ctx().request_repaint_after(Duration::from_millis(100)); }
         command
     }

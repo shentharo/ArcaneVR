@@ -15,6 +15,7 @@ pub const ROLES: [&str; 3] = ["left", "right", "torso"];
 mod calibration_session;
 mod jump_learning;
 mod walking_learning;
+mod feet_learning;
 mod crouch_learning;
 #[derive(Clone)]
 pub struct Record {
@@ -61,6 +62,8 @@ pub struct Lab {
     sensor_calibration: Option<calibration_session::Session>,
     calibration_result: Value,
     walking_learning: Option<walking_learning::Session>,
+    feet_learning: Option<feet_learning::Session>,
+    feet_learning_result: Value,
     walking_result: Value,
     walking_model: Value,
     walking_signal: walking_learning::Signal,
@@ -238,7 +241,7 @@ impl Lab {
             device_mountings,
             sensor_calibration: None,
             calibration_result: Value::Null,
-            walking_learning:None,walking_result:Value::Null,walking_model:v["walking_model"].clone(),walking_signal:Default::default(),walking_speed:0.,walking_effort:0.,
+            walking_learning:None,feet_learning:None,feet_learning_result:Value::Null,walking_result:Value::Null,walking_model:v["walking_model"].clone(),walking_signal:Default::default(),walking_speed:0.,walking_effort:0.,
             jump_learning: None,
             jump_learning_result: Value::Null,
             crouch_learning: None,
@@ -627,6 +630,7 @@ impl Lab {
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
         self.refresh_held_poses(t);
         let command = v["command"].as_str().ok_or("Missing command")?;
+        if self.feet_learning.is_some() && !matches!(command,"feet_learn_cancel"|"feet_learn_confirm"|"stop") {return Err("Finish or cancel feet calibration first".into());}
         if self.crouch_learning.is_some() && !matches!(command, "crouch_learn_cancel" | "stop") { return Err("Finish or cancel crouch learning first".into()); }
         if self.walking_learning.is_some() && !matches!(command,"walking_learn_cancel"|"stop") {return Err("Finish or cancel walking learning first".into());}
         if self.jump_learning.is_some() && !matches!(command, "jump_learn_cancel" | "stop") { return Err("Finish or cancel jump learning first".into()); }
@@ -642,6 +646,19 @@ impl Lab {
             .and_then(Value::as_str)
             .ok_or("Command must be an object with a command")?
         {
+            "feet_learn_start" => {
+                if self.demo {return Err("Feet calibration needs live sensors".into());}
+                if self.mapping[0].is_empty() || self.mapping[1].is_empty() {return Err("Assign both foot sensors first".into());}
+                self.engine.disarm();self.walking=false;self.new_generation();
+                self.feet_learning=Some(feet_learning::Session::new([self.mapping[0].clone(),self.mapping[1].clone()]));self.feet_learning_result=Value::Null;
+            },
+            "feet_learn_cancel" => {self.feet_learning=None;self.feet_learning_result=json!({"active":false,"stage":"canceled","message":"Feet calibration canceled. No recording saved."});},
+            "feet_learn_confirm" => {
+                let session=self.feet_learning.as_mut().ok_or("Start feet calibration first")?;
+                if !session.sensor.rsplit_once(':').is_some_and(|(ip,_)|self.peers.iter().any(|(peer,seen)|peer.ip().to_string()==ip && t>=*seen && t-*seen<2.)) {return Err("Foot sensor disconnected".into());}
+                session.samples.push(json!({"time":t,"stage":session.stage,"step":session.step,"sensor":session.sensor,"kind":"user_confirmation"}));
+                match session.stage {"lift"=>{session.manual_lift=true;session.stage="lower";session.last_motion=t;},"lower"=>session.advance(t),_=>return Err("This step does not accept confirmation".into())}
+            },
             "crouch_learn_start" => {
                 let h=self.action_input(t).hmd.ok_or("Connect the headset before learning crouch")?;
                 if !h.height.is_finite() || !(0.05..=4.).contains(&h.height) || t<h.seen || t-h.seen>=0.25 {return Err("Connect the headset before learning crouch".into());}
@@ -1336,6 +1353,7 @@ impl Lab {
             }
             if let Some((sensor, vector)) = slime::acceleration(k, b)? {
                 let id = format!("{}:{sensor}", addr.ip());
+                if let Some(session)=self.feet_learning.as_mut() {session.observe(&id,t,"acceleration",json!(vector));}
                 if !self.records.contains_key(&id) && self.records.len() >= 256 {
                     return Err("tracker limit");
                 }
@@ -1381,6 +1399,7 @@ impl Lab {
             }
             if let Some((sensor, q)) = slime::rotation(k, b)? {
                 let id = format!("{}:{sensor}", addr.ip());
+                if let Some(session)=self.feet_learning.as_mut() {session.observe(&id,t,"rotation",json!(q));}
                 if !self.records.contains_key(&id) && self.records.len() >= 256 {
                     return Err("tracker limit");
                 }
@@ -1464,6 +1483,7 @@ impl Lab {
         Ok(replies)
     }
     pub fn tick(&mut self, t: f64, wall: f64) {
+        self.update_feet_learning(t);
         self.update_sensor_calibration(t);
         if let Some(mut learning)=self.crouch_learning.take() {
             match learning.update(self.action_input(t)) {
@@ -1544,7 +1564,7 @@ impl Lab {
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
-        self.action_preview = if !self.engine.armed && !crate::actions::ActionProcessor::has_fresh_head(&input) {
+        self.action_preview = if !self.engine.armed && (!crate::actions::ActionProcessor::has_fresh_head(&input) || !self.actions.settings().direction.enabled) {
             self.actions.process_chest_preview(&input)
         } else {
             self.actions.process(&input)
@@ -1746,7 +1766,7 @@ impl Lab {
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
-        self.action_preview = if !self.engine.armed && !crate::actions::ActionProcessor::has_fresh_head(&input) {
+        self.action_preview = if !self.engine.armed && (!crate::actions::ActionProcessor::has_fresh_head(&input) || !self.actions.settings().direction.enabled) {
             self.actions.process_chest_preview(&input)
         } else {
             self.actions.process(&input)
@@ -1896,6 +1916,7 @@ impl Lab {
         result["game_output_preview"]=json!({"travel_xy":self.travel_xy.map(|v|v as f32),"turn_xy":self.turn_xy.map(|v|v as f32),"buttons":self.output_buttons,"armed":self.engine.armed});
         result["step_input"]=json!(if self.engine.cfg.chest_steps {"chest"} else if self.movement_engine=="body_tilt" {"off"} else {"feet"});
         result["sensor_calibration"] = self.sensor_calibration_state(t);
+        result["feet_learning"] = self.feet_learning.as_ref().map(|s|s.state(t)).unwrap_or_else(||self.feet_learning_result.clone());
         result["crouch_learning"] = self.crouch_learning.as_ref().map(|s|s.state(t)).unwrap_or_else(||self.crouch_learning_result.clone());
         result["walking_learning"]=self.walking_learning.as_ref().map(|s|s.state(t)).unwrap_or_else(||self.walking_result.clone());
         result["walking_learned"]=json!(self.walking_model["rate"].as_f64().is_some_and(|r|r.is_finite() && r>0.02) && self.current_mounting_identity(t).is_some_and(|id|self.walking_model["identity"].as_str()==Some(id.as_str())));
@@ -1918,14 +1939,14 @@ mod tests {
     #[test]
     fn restart_releases_unknown_saved_tracker_until_identity_arrives() {
         let mut l=Lab::new(PathBuf::from("nonexistent-handshake-recovery-fixture.json")).unwrap();
-        let ip="192.0.2.12".parse().unwrap();
-        l.mapping[2]="192.0.2.12:0".into();
+        let ip="10.0.0.12".parse().unwrap();
+        l.mapping[2]="10.0.0.12:0".into();
         assert!(!l.needs_identity_handshake(ip), "legacy unbound trackers remain supported");
-        l.tracker_identities.insert(l.mapping[2].clone(),"02:00:00:00:00:01".into());
+        l.tracker_identities.insert(l.mapping[2].clone(),"1C:8F:57:80:B1:62".into());
         assert!(l.needs_identity_handshake(ip));
-        l.peer_macs.insert("192.0.2.12".into(),"02:00:00:00:00:01".into());
+        l.peer_macs.insert("10.0.0.12".into(),"1C:8F:57:80:B1:62".into());
         assert!(!l.needs_identity_handshake(ip));assert!(l.identity_matches(&l.mapping[2]));
-        l.peer_macs.insert("192.0.2.12".into(),"02:00:00:80:BE:03".into());
+        l.peer_macs.insert("10.0.0.12".into(),"02:00:00:00:00:02".into());
         assert!(!l.identity_matches(&l.mapping[2]), "different hardware must not inherit the role");
         assert!(!l.engine.armed);
     }
@@ -1938,7 +1959,7 @@ mod tests {
         l.movement_engine = "body_tilt".into();
         l.engine.cfg.require_steps = false;
         l.mapping[2] = "10.0.0.94:0".into();
-        l.learned_mounting_identity = Some("02:00:00:80:BE:03:0".into());
+        l.learned_mounting_identity = Some("02:00:00:00:00:02:0".into());
         let mut settings = l.actions.settings().clone();
         settings.direction.enabled = true;
         settings.direction.pitch_sign = -1.;
@@ -1958,7 +1979,7 @@ mod tests {
         l.command(&json!({"command":"profile_load","name":"Old reversed profile"}), 1.).unwrap();
         assert_eq!(l.actions.settings().direction.forward_max_angle, Some(0.5));
         fn pose(l: &mut Lab, q: Q, t: f64) {
-            l.peer_macs.insert("10.0.0.94".into(), "02:00:00:80:BE:03".into());
+            l.peer_macs.insert("10.0.0.94".into(), "02:00:00:00:00:02".into());
             l.records.insert(l.mapping[2].clone(), Record {q,seen:t,angular:0.,has_interval:true});
             l.engine.update(2,q,t).unwrap();
         }
@@ -1972,7 +1993,7 @@ mod tests {
                 l = Lab::new(path.clone()).unwrap();
                 // A physical tracker reboot starts a new stream/zero heading;
                 // retain MAC-bound axes while invalidating the old center.
-                l.ingest(&identity_packet([0x02,0x00,0x00,0x80,0xbe,0x03]), "10.0.0.94:6969".parse().unwrap(),t-0.01).unwrap();
+                l.ingest(&identity_packet([0x02,0x00,0x00,0x00,0x00,0x02]), "10.0.0.94:6969".parse().unwrap(),t-0.01).unwrap();
                 assert!(!l.engine.calibrated);
             }
             assert_eq!(l.actions.settings().direction.pitch_sign, -1.);
@@ -2006,8 +2027,8 @@ mod tests {
     #[test]
     fn device_mapping_flips_persist_and_reset_without_touching_assignment() {
         let dir=std::env::temp_dir().join(format!("device-flip-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));fs::create_dir_all(&dir).unwrap();let path=dir.join("config.json");
-        let mut lab=Lab::new(path.clone()).unwrap();lab.movement_engine="body_tilt".into();lab.engine.cfg.require_steps=false;lab.mapping[2]="10.0.0.3:0".into();let identity="02:00:00:80:BE:03:0";
-        lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:80:BE:03".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,1.).unwrap();
+        let mut lab=Lab::new(path.clone()).unwrap();lab.movement_engine="body_tilt".into();lab.engine.cfg.require_steps=false;lab.mapping[2]="10.0.0.3:0".into();let identity="02:00:00:00:00:02:0";
+        lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:00:00:02".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,1.).unwrap();
         lab.learned_mounting_identity=Some(identity.into());let mut s=lab.actions.settings().clone();s.direction.enabled=true;s.direction.learned_forward=Some([1.,0.,0.]);s.direction.learned_right=Some([0.,0.,1.]);lab.actions=crate::actions::ActionProcessor::new(s).unwrap();lab.remember_device_mounting(identity);
         lab.command(&json!({"command":"device_mounting","identity":identity,"operation":"flip_forward"}),1.).unwrap();lab.command(&json!({"command":"device_mounting","identity":identity,"operation":"flip_lateral"}),1.).unwrap();assert_eq!(lab.actions.settings().direction.pitch_sign,-1.);assert_eq!(lab.actions.settings().direction.roll_sign,-1.);assert!(!lab.engine.armed);
         let mut stale=lab.actions.settings().to_json();stale["direction"]["pitch_sign"]=json!(1.);stale["direction"]["roll_sign"]=json!(1.);
@@ -2020,15 +2041,15 @@ mod tests {
         assert_eq!(lab.actions.settings().direction.pitch_sign,1.);assert_eq!(lab.actions.settings().direction.roll_sign,1.);assert!(!lab.engine.calibrated);
         assert_eq!(lab.device_mountings[identity]["face_turned_over"],true);
         drop(lab);let mut lab=Lab::new(path.clone()).unwrap();assert_eq!(lab.device_mountings[identity]["face_turned_over"],true);
-        lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:80:BE:03".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,1.).unwrap();
+        lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:00:00:02".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,1.).unwrap();
         lab.command(&json!({"command":"device_mounting","identity":identity,"operation":"turn_over"}),1.).unwrap();assert_eq!(lab.device_mountings[identity]["face_turned_over"],false);
-        let mut lab=Lab::new(path.clone()).unwrap();assert_eq!(lab.actions.settings().direction.pitch_sign,-1.);assert_eq!(lab.device_mountings[identity]["roll_sign"],-1.);lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:80:BE:03".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:2.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,2.).unwrap();
-        let before=lab.actions.settings().direction.max_angle;lab.command(&json!({"command":"device_mounting","identity":identity,"operation":"reset"}),2.).unwrap();assert_eq!(lab.actions.settings().direction.max_angle,before);assert_eq!(lab.mapping[2],"10.0.0.3:0");assert!(lab.actions.settings().direction.learned_forward.is_none());assert!(lab.learned_mounting_identity.is_none());assert!(!lab.device_mountings.contains_key(identity));assert!(!lab.engine.calibrated);drop(lab);let mut restored=Lab::new(path).unwrap();restored.ingest(&identity_packet([0x02,0x00,0x00,0x80,0xbe,0x03]),"10.0.0.3:6969".parse().unwrap(),3.).unwrap();assert!(restored.learned_mounting_identity.is_none());assert!(restored.actions.settings().direction.learned_forward.is_none());assert!(!restored.device_mountings.contains_key(identity));fs::remove_dir_all(dir).unwrap();
+        let mut lab=Lab::new(path.clone()).unwrap();assert_eq!(lab.actions.settings().direction.pitch_sign,-1.);assert_eq!(lab.device_mountings[identity]["roll_sign"],-1.);lab.peer_macs.insert("10.0.0.3".into(),"02:00:00:00:00:02".into());lab.records.insert(lab.mapping[2].clone(),Record{q:crate::gait::IDENTITY,seen:2.,angular:0.,has_interval:true});lab.engine.update(2,crate::gait::IDENTITY,2.).unwrap();
+        let before=lab.actions.settings().direction.max_angle;lab.command(&json!({"command":"device_mounting","identity":identity,"operation":"reset"}),2.).unwrap();assert_eq!(lab.actions.settings().direction.max_angle,before);assert_eq!(lab.mapping[2],"10.0.0.3:0");assert!(lab.actions.settings().direction.learned_forward.is_none());assert!(lab.learned_mounting_identity.is_none());assert!(!lab.device_mountings.contains_key(identity));assert!(!lab.engine.calibrated);drop(lab);let mut restored=Lab::new(path).unwrap();restored.ingest(&identity_packet([0x02,0x00,0x00,0x00,0x00,0x02]),"10.0.0.3:6969".parse().unwrap(),3.).unwrap();assert!(restored.learned_mounting_identity.is_none());assert!(restored.actions.settings().direction.learned_forward.is_none());assert!(!restored.device_mountings.contains_key(identity));fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn device_calibrations_follow_identity_through_switch_and_dhcp() {
         let dir=std::env::temp_dir().join(format!("device-switch-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));fs::create_dir_all(&dir).unwrap();let path=dir.join("config.json");let mut l=Lab::new(path.clone()).unwrap();l.movement_engine="body_tilt".into();l.engine.cfg.require_steps=false;l.auto_add=false;
-        let a="10.1.0.1:0";let b="10.1.0.2:0";let ma="02:00:00:82:6C:63";let mb="02:00:00:80:BE:03";let ia=format!("{ma}:0");let ib=format!("{mb}:0");
+        let a="10.1.0.1:0";let b="10.1.0.2:0";let ma="02:00:00:00:00:01";let mb="02:00:00:00:00:02";let ia=format!("{ma}:0");let ib=format!("{mb}:0");
         for (id,mac) in [(a,ma),(b,mb)] {let ip=id.rsplit_once(':').unwrap().0;l.peer_macs.insert(ip.into(),mac.into());l.records.insert(id.into(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});}
         let mut s=l.actions.settings().clone();s.direction.enabled=true;s.direction.learned_forward=Some([1.,0.,0.]);s.direction.learned_right=Some([0.,0.,1.]);l.actions=crate::actions::ActionProcessor::new(s.clone()).unwrap();l.learned_mounting_identity=Some(ia.clone());l.remember_device_mounting(&ia);
         s.direction.learned_forward=Some([0.,1.,0.]);s.direction.roll_sign=-1.;l.actions=crate::actions::ActionProcessor::new(s).unwrap();l.learned_mounting_identity=Some(ib.clone());l.remember_device_mounting(&ib);
@@ -2038,7 +2059,7 @@ mod tests {
         l.command(&json!({"command":"device_mounting","identity":ia,"operation":"flip_forward"}),1.).unwrap();assert!(l.engine.calibrated);assert!(!l.engine.armed);assert_eq!(l.actions.settings().direction.pitch_sign,-1.);
         l.command(&json!({"command":"assign_sensor_role","role":"torso","id":b}),1.).unwrap();assert!(!l.engine.calibrated);assert_eq!(l.actions.settings().direction.learned_forward,Some([0.,1.,0.]));assert_eq!(l.actions.settings().direction.roll_sign,-1.);
         l.command(&json!({"command":"assign_sensor_role","role":"torso","id":a}),1.).unwrap();assert_eq!(l.actions.settings().direction.pitch_sign,-1.);assert!(!l.engine.calibrated);
-        drop(l);let mut l=Lab::new(path).unwrap();l.ingest(&identity_packet([0x02,0x00,0x00,0x82,0x6c,0x63]),"10.1.0.7:6969".parse().unwrap(),2.).unwrap();assert_eq!(l.mapping[2],"10.1.0.7:0");assert!(!l.engine.calibrated);l.ingest(&identity_rotation(1),"10.1.0.7:6969".parse().unwrap(),2.1).unwrap();assert!(l.mounting_valid(2.1));assert_eq!(l.actions.settings().direction.pitch_sign,-1.);fs::remove_dir_all(dir).unwrap();
+        drop(l);let mut l=Lab::new(path).unwrap();l.ingest(&identity_packet([0x02,0x00,0x00,0x00,0x00,0x01]),"10.1.0.7:6969".parse().unwrap(),2.).unwrap();assert_eq!(l.mapping[2],"10.1.0.7:0");assert!(!l.engine.calibrated);l.ingest(&identity_rotation(1),"10.1.0.7:6969".parse().unwrap(),2.1).unwrap();assert!(l.mounting_valid(2.1));assert_eq!(l.actions.settings().direction.pitch_sign,-1.);fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn mounting_binding_follows_mac_not_address_or_center() {
@@ -2057,7 +2078,7 @@ mod tests {
             if l.mapping[2] == id { l.engine.update(2,q,t).unwrap(); }
         }
         let a="10.0.0.1:0"; let b="10.0.0.2:0";
-        let ma="02:00:00:82:6C:63"; let mb="02:00:00:80:BE:03";
+        let ma="02:00:00:00:00:01"; let mb="02:00:00:00:00:02";
         pose(&mut l,a,ma,crate::gait::IDENTITY,1.);
         l.command(&json!({"command":"assign_sensor_role","role":"torso","id":a}),1.).unwrap();
         pose(&mut l,a,ma,crate::gait::IDENTITY,1.1); l.command(&json!({"command":"calibrate"}),1.1).unwrap();
@@ -2076,7 +2097,7 @@ mod tests {
         pose(&mut l,b,mb,right,2.3); l.command(&json!({"command":"learn_tilt_right"}),2.3).unwrap();
         let mut restored = Lab::new(path.clone()).unwrap();
         let new_addr: SocketAddr = "10.0.0.3:6969".parse().unwrap();
-        restored.ingest(&identity_packet([0x02,0x00,0x00,0x80,0xbe,0x03]),new_addr,3.).unwrap();
+        restored.ingest(&identity_packet([0x02,0x00,0x00,0x00,0x00,0x02]),new_addr,3.).unwrap();
         restored.ingest(&identity_rotation(1),new_addr,3.1).unwrap();
         assert_eq!(restored.mapping[2],"10.0.0.3:0"); assert!(restored.mounting_valid(3.1));
         assert!(!restored.engine.armed);
@@ -2306,15 +2327,15 @@ mod tests {
         let path=std::env::temp_dir().join(format!("arcane-identity-{}-{}.json",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let mut l=Lab::new(path.clone()).unwrap();l.movement_engine="body_tilt".into();l.engine.cfg.require_steps=false;
         let a:SocketAddr="10.1.0.10:6969".parse().unwrap();let b:SocketAddr="10.1.0.11:6969".parse().unwrap();
-        let mac=[0x02,0x00,0x00,0x82,0x6c,0x63];
+        let mac=[0x02,0x00,0x00,0x00,0x00,0x01];
         l.ingest(&identity_packet(mac),a,1.).unwrap();l.ingest(&identity_rotation(1),a,1.1).unwrap();
-        assert_eq!(l.mapping[2],"10.1.0.10:0");assert_eq!(l.snapshot(1.1)["roles"]["torso"]["mac"],"02:00:00:82:6C:63");
+        assert_eq!(l.mapping[2],"10.1.0.10:0");assert_eq!(l.snapshot(1.1)["roles"]["torso"]["mac"],"02:00:00:00:00:01");
         l.engine.calibrated=true;l.engine.armed=true;
         l.ingest(&identity_packet([0x20,1,2,3,4,5]),a,2.).unwrap();l.ingest(&identity_rotation(1),a,2.1).unwrap();
         assert!(!l.engine.armed && !l.engine.fresh(2.1));assert_eq!(l.mapping[2],"10.1.0.10:0");
         l.ingest(&identity_packet(mac),b,3.).unwrap();l.ingest(&identity_rotation(1),b,3.1).unwrap();
         assert_eq!(l.mapping[2],"10.1.0.11:0");assert!(!l.engine.calibrated && !l.engine.armed);
-        let mut restored=Lab::new(path.clone()).unwrap();assert_eq!(restored.mapping[2],"10.1.0.11:0");assert_eq!(restored.tracker_identities["10.1.0.11:0"],"02:00:00:82:6C:63");
+        let mut restored=Lab::new(path.clone()).unwrap();assert_eq!(restored.mapping[2],"10.1.0.11:0");assert_eq!(restored.tracker_identities["10.1.0.11:0"],"02:00:00:00:00:01");
         let c:SocketAddr="10.1.0.12:6969".parse().unwrap();
         restored.ingest(&identity_packet(mac),c,4.).unwrap();restored.ingest(&identity_rotation(1),c,4.1).unwrap();
         assert_eq!(restored.mapping[2],"10.1.0.12:0");assert!(!restored.engine.armed && !restored.engine.calibrated);
@@ -2851,8 +2872,8 @@ mod tests {
         l.movement_engine = "body_tilt".into();
         l.engine.cfg.require_steps = false;
         l.mapping[2] = "10.0.0.1:0".into();
-        l.peer_macs.insert("10.0.0.1".into(), "02:00:00:80:BE:03".into());
-        l.learned_mounting_identity = Some("02:00:00:80:BE:03:0".into());
+        l.peer_macs.insert("10.0.0.1".into(), "02:00:00:00:00:02".into());
+        l.learned_mounting_identity = Some("02:00:00:00:00:02:0".into());
         let mut settings = crate::actions::Settings::default();
         settings.direction.enabled = true;
         settings.turn.enabled = true;
@@ -2916,15 +2937,15 @@ mod tests {
         let dir=std::env::temp_dir().join(format!("arcane-tilt-chest-only-{}",std::process::id()));std::fs::create_dir_all(&dir).unwrap();
         let mut l=Lab::new(dir.join("config.json")).unwrap();
         l.command(&json!({"command":"movement_engine","engine":"body_tilt"}),0.).unwrap();
-        l.records.insert("192.0.2.12:0".into(),Record{q:[1.,0.,0.,0.],seen:1.,angular:0.,has_interval:true});
-        l.command(&json!({"command":"assign","trackers":{"left":"","right":"","torso":"192.0.2.12:0"}}),1.).unwrap();
+        l.records.insert("10.0.0.12:0".into(),Record{q:[1.,0.,0.,0.],seen:1.,angular:0.,has_interval:true});
+        l.command(&json!({"command":"assign","trackers":{"left":"","right":"","torso":"10.0.0.12:0"}}),1.).unwrap();
         l.engine.update(2,[1.,0.,0.,0.],1.).unwrap();
         assert!(l.engine.fresh(1.));
         l.command(&json!({"command":"calibrate"}),1.).unwrap();assert!(l.engine.calibrated);assert!(!l.engine.armed);
         assert!(!l.engine.fresh(2.));
         assert!(l.command(&json!({"command":"calibrate"}),2.).is_err());
         l.command(&json!({"command":"movement_engine","engine":"chest_heading_steps"}),2.).unwrap();
-        assert!(l.command(&json!({"command":"assign","trackers":{"left":"","right":"","torso":"192.0.2.12:0"}}),2.).is_err());
+        assert!(l.command(&json!({"command":"assign","trackers":{"left":"","right":"","torso":"10.0.0.12:0"}}),2.).is_err());
     }
     #[test]
     fn sensor_layouts_persist_roles_and_require_thighs(){

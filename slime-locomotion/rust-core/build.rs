@@ -1,4 +1,14 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=ARCANEVR_EMBED_RENDERER");
+    let output=std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded-test-room.exe");
+    let mut renderer_id=String::from("none");
+    if let Some(path)=std::env::var_os("ARCANEVR_EMBED_RENDERER") {
+        println!("cargo:rerun-if-changed={}",std::path::Path::new(&path).display());
+        std::fs::copy(path,&output).expect("copy verified renderer into application build");
+        use std::hash::{Hash,Hasher};
+        let bytes=std::fs::read(&output).expect("read bundled renderer");let mut hash=std::collections::hash_map::DefaultHasher::new();bytes.hash(&mut hash);renderer_id=format!("{:016x}",hash.finish());
+    } else {std::fs::write(&output,[]).expect("create empty development renderer placeholder");}
+    println!("cargo:rustc-env=ARCANEVR_RENDERER_ID={renderer_id}");
     let header=std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../openvr/headers/openvr_capi.h");
     println!("cargo:rerun-if-changed={}",header.display());
     let text=std::fs::read_to_string(header).expect("OpenVR C header");

@@ -162,8 +162,16 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
     if !is_ready {paint.rect_filled(banner,12.,Color32::from_black_alpha((35.*pulse) as u8));}
     let calibrate=online && all && !_busy;
     if hit("Recenter",box_at(434.,76.,111.,42.),calibrate && state["calibration_ready"]==true).clicked(){action=Some(Action::ResetCenter);}
-    let tilt=matches!(state["movement_engine"].as_str(),Some("body_tilt"|"body_tilt_steps"));
-    if hit("Calibrate",box_at(555.,76.,109.,42.),calibrate && tilt).clicked(){action=Some(Action::SensorCalibration);}
+    // The calibration menu must remain available while sensors are offline:
+    // feet learning deliberately starts with one tracker switched off.
+    let calibration_menu=online && !_busy;
+    let calibrate_rect=box_at(555.,76.,109.,42.);
+    if calibration_menu {
+        paint.rect_filled(calibrate_rect,7.,Color32::from_rgb(13,40,52));
+        paint.rect_stroke(calibrate_rect,7.,Stroke::new(1.5*scale,Color32::from_rgb(50,177,199)),egui::StrokeKind::Inside);
+        paint.text(calibrate_rect.center(),egui::Align2::CENTER_CENTER,"Calibrate",egui::FontId::proportional(19.*scale),Color32::from_rgb(96,219,231));
+    }
+    if hit("Calibrate",calibrate_rect,calibration_menu).clicked(){action=Some(Action::SensorCalibration);}
     let armed=state["armed"]==true;
     if armed {paint.circle_filled(pos(159.,451.),7.*scale,pages::MINT);}
     if hit("Game movement",box_at(145.,434.,215.,36.),armed||can_enable).clicked(){action=Some(Action::SetMovement(!armed));}
@@ -214,7 +222,7 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
         response.clone().on_hover_text(match connected {Some(true)=>"Connected",Some(false)=>"Not connected",None=>"Controller status unavailable: the receiver does not report individual controllers"});
         if index==0 && response.clicked(){action=Some(Action::Navigate(Page::QuickSetup));}
     }
-    let settings=box_at(675.,76.,42.,42.);
+    let settings=box_at(942.,86.,42.,42.);
     paint.rect_filled(settings,8.,Color32::from_rgb(24,43,57));
     let center=settings.center();let color=pages::CYAN;
     paint.circle_stroke(center,9.*scale,Stroke::new(2.*scale,color));
@@ -269,13 +277,29 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
             None
         };
         assert!(matches!(click(87.,530.),Some(Action::Navigate(Page::QuickSetup))));
-        assert!(matches!(click(665.,67.),Some(Action::Navigate(Page::Settings))));
+        assert!(matches!(click(933.,77.),Some(Action::Navigate(Page::Settings))));
         assert!(click(350.,530.).is_none());
         assert!(matches!(click(450.,67.),Some(Action::ResetCenter)));
         assert!(matches!(click(570.,67.),Some(Action::SensorCalibration)));
         assert!(matches!(click(130.,422.),Some(Action::SetMovement(true))));
         assert!(matches!(click(400.,420.),Some(Action::BoundarySetup)));
         assert!(matches!(click(270.,455.),Some(Action::ForceSteamHome)));
+    }
+    #[test]
+    fn calibration_menu_opens_with_foot_mode_and_offline_sensors() {
+        let ctx=egui::Context::default();
+        let state=serde_json::json!({"sensor_layout":{"count":3},"roles":{"torso":{"fresh":false},"left":{"fresh":false},"right":{"fresh":false}},"movement_engine":"chest_heading_steps","calibration_ready":false});
+        let mut frame=|events|{
+            let mut result=None;
+            let input=egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(964.,705.))),events,..Default::default()};
+            let _=ctx.run(input,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{result=show(ui,&state,true,false,false,false);});});result
+        };
+        frame(vec![]);let pos=egui::pos2(570.,67.);
+        for pressed in [true,false] {
+            let event=egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+            let action=frame(vec![egui::Event::PointerMoved(pos),event]);
+            if !pressed {assert!(matches!(action,Some(Action::SensorCalibration)));}
+        }
     }
     #[test] fn readiness_tracks_each_dependency_in_order() {
         let mut s=serde_json::json!({"mode":"live","output_mode":"steamvr","steamvr":{"driver_connected":true,"hmd_ready":true,"driver_calibrated":true},"calibrated":true,"movement_engine":"body_tilt","actions":{"preview":{"calibrated":true,"direction_status":"ready"}},"locomotion":{"input_ready":true}});

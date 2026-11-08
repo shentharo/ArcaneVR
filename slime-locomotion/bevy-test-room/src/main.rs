@@ -1,5 +1,6 @@
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::animation::AnimationTarget;
+use bevy::animation::transition::AnimationTransitions;
 use bevy::transform::TransformSystem;
 use bevy::math::Affine2;
 use bevy::{
@@ -9,6 +10,9 @@ use bevy::{
     render::view::screenshot::{save_to_disk, Screenshot},
 };
 use serde_json::Value;
+mod foot_pose;
+#[derive(Resource)]
+struct FootRigResource(foot_pose::FootRig);
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     io::{Read, Write},
@@ -25,6 +29,9 @@ struct Launch {
     captured: bool,
     controls: Arc<Mutex<Vec<String>>>,
     report: Option<String>,
+    report_after: f32,
+    series: Option<String>,
+    last_series: f32,
     reported: bool,
     calibration: bool,
 }
@@ -48,6 +55,15 @@ struct Room {
     max_walk_speed: f32,
     max_sprint_speed: f32,
     local: Vec2,
+    visual_local: Vec2,
+    body_lean: Vec2,
+    lean_min: Vec2,
+    lean_max: Vec2,
+    foot_pose: [f32;2],
+    foot_pose_max: [f32;2],
+    foot_direct: bool,
+    foot_profiles: usize,
+    foot_running: bool,
     reason: String,
     last_stamp: Option<f64>,
     stamp_changed: Instant,
@@ -134,6 +150,9 @@ fn main() {
     let embedded = args.iter().any(|s|s=="--embedded");
     let calibration = args.iter().any(|s|s=="--calibration-preview");
     let report = get("--qa-report");
+    let report_after=get("--qa-report-after").and_then(|s|s.parse::<f32>().ok()).filter(|n|n.is_finite() && (1. ..=120.).contains(n)).unwrap_or(10.);
+    let series=get("--qa-series");
+    let foot_dir=get("--foot-calibration-dir").map(std::path::PathBuf::from).unwrap_or_else(||std::path::PathBuf::from("feet-calibrations"));
     let controls=Arc::new(Mutex::new(Vec::new()));
     let queued=controls.clone();
     let quit = Arc::new(AtomicBool::new(false));
@@ -164,11 +183,13 @@ fn main() {
             captured: false,
             controls,
             report,
+            report_after,series,last_series:0.,
             reported: false,
             calibration,
         })
         .insert_resource(feed)
         .init_resource::<StrideTelemetry>()
+        .insert_resource(FootRigResource(foot_pose::FootRig::load(&foot_dir)))
         .insert_resource(Room {
             paused: false,
             yaw: 0.,
@@ -177,6 +198,7 @@ fn main() {
             anim: "Idle".into(),
             speed: 0.,max_walk_speed:0.,max_sprint_speed:0.,
             local: Vec2::ZERO,
+            visual_local: Vec2::ZERO, body_lean: Vec2::ZERO,lean_min:Vec2::ZERO,lean_max:Vec2::ZERO,foot_pose:[0.;2],foot_pose_max:[0.;2],foot_direct:false,foot_profiles:0,foot_running:false,
             reason: "Connecting".into(),
             last_stamp: None,
             stamp_changed: Instant::now(),
@@ -258,9 +280,13 @@ fn number(v: &Value) -> f32 {
 fn motion(v: &Value) -> Vec2 {
     // The receiver owns all mapping, speed, and slowdown. These are the same
     // float32 axes packed into ALC2, before the game-output arm gate.
-    if let Some(axes)=v["game_output_preview"]["travel_xy"].as_array() {
+    // Foot-step speed is gated to zero in the receiver while output is disarmed.
+    // Test Room itself requires disarmed output, so use the independent live
+    // step preview below for these modes.
+    let foot_steps = v["step_input"] == "feet" && matches!(v["movement_engine"].as_str(), Some("body_tilt_steps" | "chest_heading_steps"));
+    if !foot_steps { if let Some(axes)=v["game_output_preview"]["travel_xy"].as_array() {
         if axes.len()==2 {return Vec2::new(number(&axes[0]),number(&axes[1])).clamp_length_max(1.);}
-    }
+    }}
 
     let mode = v["movement_engine"].as_str().unwrap_or("");
     let speed = number(&v["locomotion"]["preview"]["speed"]).clamp(0., 1.);
@@ -481,6 +507,7 @@ fn move_avatar(
     feed: Res<Feed>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut foot_rig: ResMut<FootRigResource>,
     mut room: ResMut<Room>,
     mut q: Query<&mut Transform, With<Avatar>>,
 ) {
@@ -512,6 +539,7 @@ fn move_avatar(
         room.local=if valid && angles.is_array() {
             Vec2::new(number(&angles[0]),number(&angles[1])).clamp_length_max(0.62)
         } else {Vec2::ZERO};
+        room.body_lean=room.local;
         room.reason=if valid {"Calibrating"}else{"Waiting for sensor"}.into();
         room.speed=0.;
         room.anim="Idle".into();
@@ -529,13 +557,11 @@ fn move_avatar(
     {
         "API stale"
     } else if !preview_calibrated(&v) {
-        "Reset Center required"
+        "Centering sensors"
     } else if v["armed"] != false {
         "VR output armed"
     } else if v["roles"]["torso"]["fresh"] != true {
         "Chest stale"
-    } else if v["locomotion"]["input_ready"] != true {
-        "Input not ready"
     } else if !v["heading"].as_f64().is_some_and(f64::is_finite) {
         "Heading unavailable"
     } else if room.paused {
@@ -548,6 +574,7 @@ fn move_avatar(
     room.local = Vec2::ZERO;
     room.anim = "Idle".into();
     if reason != "Live" {
+        room.visual_local=Vec2::ZERO;room.body_lean=Vec2::ZERO;room.foot_pose=[0.;2];room.foot_direct=false;room.foot_running=false;
         room.jump = JumpState::default(); room.jump_test = false; room.clip="Idle_Loop"; room.clip_speed=1.;
         q.single_mut().translation.y = 0.;
         return;
@@ -559,8 +586,21 @@ fn move_avatar(
     if room.live_frames>0 {room.spin+=delta.sin().atan2(delta.cos());}
     room.yaw = yaw;
     room.live_frames+=1;
-    let m = motion(&v);
+    // A stale foot must stop translation, but it must not freeze the fresh
+    // chest sensor's facing and lean while the user is standing still.
+    let m = if v["locomotion"]["input_ready"] == true {motion(&v)} else {Vec2::ZERO};
+    room.foot_direct=v["step_input"]=="feet";
+    if room.foot_direct {
+        let (feet,_)=foot_rig.0.update(&v,time.delta_secs());room.foot_pose=feet;room.foot_profiles=foot_rig.0.profile_count();room.foot_running=foot_rig.0.running();
+        for (peak,value) in room.foot_pose_max.iter_mut().zip(feet) {*peak=peak.max(value);}
+    } else {room.foot_pose=[0.;2];room.foot_running=false;}
     room.local = m;
+    let lean=&v["actions"]["preview"]["raw_direction_angles"];
+    let lean_target=if lean.is_array() {Vec2::new(number(&lean[0]),number(&lean[1])-number(&v["actions"]["settings"]["direction"]["forward_offset"])).clamp_length_max(0.7)} else {Vec2::ZERO};
+    let blend=1.-(-time.delta_secs().min(0.1)/0.12).exp();
+    room.body_lean=room.body_lean.lerp(lean_target,blend);
+    room.lean_min=room.lean_min.min(room.body_lean);room.lean_max=room.lean_max.max(room.body_lean);
+    room.visual_local=room.visual_local.lerp(m,blend);
     let mut t = q.single_mut();
     t.rotation = Quat::from_rotation_y(yaw);
     let pressed = v["actions"]["preview"]["jump_pressed"] == true;
@@ -579,8 +619,9 @@ fn move_avatar(
     room.speed = world.length();
     if sprint {room.max_sprint_speed=room.max_sprint_speed.max(room.speed);}else{room.max_walk_speed=room.max_walk_speed.max(room.speed);}
     let max_output = v["actions"]["settings"]["direction"]["max_output"].as_f64().filter(|v| v.is_finite() && *v > 0.).unwrap_or(1.) as f32;
-    let relative_speed = if sprint {1.2}else{(m.length() / max_output).clamp(0., 1.)};
-    (room.clip, room.clip_speed) = animation_for(m, relative_speed, v["actions"]["preview"]["crouching"] == true, room.jump.clip());
+    let visual_speed=if sprint {1.2}else{(room.visual_local.length()/max_output).clamp(0.,1.)};
+    (room.clip, room.clip_speed) = animation_for(room.visual_local, visual_speed, v["actions"]["preview"]["crouching"] == true, room.jump.clip());
+    if room.foot_direct && room.jump.clip().is_none() && v["actions"]["preview"]["crouching"]!=true {room.clip="Idle_Loop";room.clip_speed=1.;}
     let current_clip = room.clip.to_owned();
     if !room.clips_seen.contains(&current_clip) { room.clips_seen.push(current_clip); }
     if room.speed > 0.015 {
@@ -645,18 +686,21 @@ fn animate(
     mut commands: Commands,
     clips: Option<Res<Clips>>,
     room: Res<Room>,
-    mut players: Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
+    mut players: Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>, Option<&mut AnimationTransitions>)>,
 ) {
     let Some(clips) = clips else { return };
-    for (e, mut player, graph) in &mut players {
+    for (e, mut player, graph, transitions) in &mut players {
         if graph.is_none() {
             commands
                 .entity(e)
-                .insert(AnimationGraphHandle(clips.graph.clone()));
+                .insert((AnimationGraphHandle(clips.graph.clone()),AnimationTransitions::new()));
         }
-        if let Some((_, idx)) = clips.clips.iter().find(|(name, _)| name == room.clip) {
-            if !player.is_playing_animation(*idx) { player.stop_all(); }
-            player.play(*idx).repeat().set_speed(room.clip_speed);
+        if let (Some(mut transitions),Some((_, idx))) = (transitions,clips.clips.iter().find(|(name, _)| name == room.clip)) {
+            if transitions.get_main_animation()!=Some(*idx) {
+                transitions.play(&mut player,*idx,Duration::from_millis(180)).repeat().set_speed(room.clip_speed);
+            } else if let Some(animation)=player.animation_mut(*idx) {
+                animation.set_speed(room.clip_speed);
+            }
         }
     }
 }
@@ -680,29 +724,41 @@ fn procedural_strafe(
         evidence.lean=room.local.x;
         return;
     }
-    let pose=if room.reason=="Live" {stride_pose(room.local,time.elapsed_secs(),room.jump.elapsed.is_some())} else {None};
-    let Some(pose)=pose else {
-        for (_,_,_,offset) in &mut bones { if offset.is_some_and(|q|q.0.dot(Quat::IDENTITY).abs()<0.99999) {evidence.residual+=1;} }
-        return;
-    };
+    let pose=if room.reason=="Live" && !room.foot_direct {stride_pose(room.visual_local,time.elapsed_secs(),room.jump.elapsed.is_some())} else {None};
     for (entity,name,mut transform,offset) in &mut bones {
-        let rotation=match name.as_str() {
+        if matches!(name.as_str(),"spine_01"|"spine_02"|"spine_03") {
+            let weight=match name.as_str(){"spine_01"=>0.4,"spine_02"=>0.35,_=>0.25};
+            let strafe=if name.as_str()=="spine_01" {pose.map_or(0.,|p|p.lean)}else{0.};
+            let rotation=Quat::from_rotation_z(-room.body_lean.x*weight+strafe)*Quat::from_rotation_x(room.body_lean.y*weight);
+            transform.rotation=(transform.rotation*rotation).normalize();
+            if let Some(mut previous)=offset {previous.0=rotation;} else {commands.entity(entity).insert(StrideOffset(rotation));}
+            evidence.bones+=1;continue;
+        }
+        let rotation=if room.foot_direct && room.jump.elapsed.is_none() {
+            let [left,right]=room.foot_pose;
+            match name.as_str() {
+                "thigh_l"=>Quat::from_rotation_x(-0.85*left),"thigh_r"=>Quat::from_rotation_x(-0.85*right),
+                "calf_l"=>Quat::from_rotation_x(1.4*left),"calf_r"=>Quat::from_rotation_x(1.4*right),
+                "foot_l"=>Quat::from_rotation_x(-0.5*left),"foot_r"=>Quat::from_rotation_x(-0.5*right),
+                "upperarm_l"=>Quat::from_rotation_x(-0.25*right),"upperarm_r"=>Quat::from_rotation_x(-0.25*left),
+                _=>continue,
+            }
+        } else if let Some(pose)=pose {match name.as_str() {
             "thigh_l"=>Quat::from_rotation_z(pose.left),
             "thigh_r"=>Quat::from_rotation_z(pose.right),
             "calf_l"=>Quat::from_rotation_x(pose.left_knee),
             "calf_r"=>Quat::from_rotation_x(pose.right_knee),
             "foot_l"=>Quat::from_rotation_x(-pose.left_knee*0.6),
             "foot_r"=>Quat::from_rotation_x(-pose.right_knee*0.6),
-            "spine_01"=>Quat::from_rotation_z(pose.lean),
             "upperarm_l"=>Quat::from_rotation_z(pose.arm),
             "upperarm_r"=>Quat::from_rotation_z(-pose.arm),
             _=>continue,
-        };
+        }} else {continue;};
         transform.rotation=(transform.rotation*rotation).normalize();
         if let Some(mut previous)=offset {previous.0=rotation;} else {commands.entity(entity).insert(StrideOffset(rotation));}
         evidence.bones+=1;
     }
-    evidence.active=evidence.bones>=7;evidence.left=pose.left;evidence.right=pose.right;evidence.lean=pose.lean;
+    evidence.active=room.foot_direct || pose.is_some();evidence.left=if room.foot_direct {room.foot_pose[0]}else{pose.map_or(0.,|p|p.left)};evidence.right=if room.foot_direct {room.foot_pose[1]}else{pose.map_or(0.,|p|p.right)};evidence.lean=room.body_lean.x;
 }
 fn hud(
     room: Res<Room>,
@@ -734,11 +790,18 @@ fn exit_checks(
     stride: Res<StrideTelemetry>,
 ) {
     let finishing=launch.quit.load(Ordering::Relaxed)||room.seconds.is_some_and(|s|room.started.elapsed().as_secs_f32()>=s-0.1);
-    if !launch.reported && (finishing||(room.seconds.is_none()&&room.started.elapsed().as_secs_f32()>10.)) {
+    let elapsed=room.started.elapsed().as_secs_f32();
+    if let Some(path)=launch.series.clone() {if elapsed-launch.last_series>=0.1 {
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _=writeln!(file,"{}",serde_json::json!({"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
+        }
+        launch.last_series=elapsed;
+    }}
+    if !launch.reported && (finishing||(room.seconds.is_none()&&elapsed>launch.report_after)) {
         if let Some(path)=&launch.report {
             let pos=avatar.single().translation;
             let fixed_ground=ground.iter().all(|g|g.translation==Vec3::ZERO);
-            let value=serde_json::json!({"position":[pos.x,pos.y,pos.z],"speed_mps":room.speed,"max_walk_speed":room.max_walk_speed,"max_sprint_speed":room.max_sprint_speed,"local_input":[room.local.x,room.local.y],"distance_m":room.distance,"rotation_degrees":room.spin.to_degrees(),"facing_degrees":room.yaw.to_degrees(),"virtual_turn_degrees":room.virtual_turn.to_degrees(),"live_frames":room.live_frames,"animations_seen":room.animations_seen,"clips_seen":room.clips_seen,"clip":room.clip,"clip_speed":room.clip_speed,"fixed_ground":fixed_ground,"reason":room.reason,"character_loaded":clips.is_some(),"calibration_preview":launch.calibration,"procedural_strafe":{"active":stride.active,"bones":stride.bones,"left":stride.left,"right":stride.right,"lean":stride.lean,"residual_offsets":stride.residual}});
+            let value=serde_json::json!({"position":[pos.x,pos.y,pos.z],"speed_mps":room.speed,"max_walk_speed":room.max_walk_speed,"max_sprint_speed":room.max_sprint_speed,"local_input":[room.local.x,room.local.y],"body_lean":[room.body_lean.x,room.body_lean.y],"foot_pose":room.foot_pose,"foot_pose_max":room.foot_pose_max,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"lean_min":[room.lean_min.x,room.lean_min.y],"lean_max":[room.lean_max.x,room.lean_max.y],"distance_m":room.distance,"rotation_degrees":room.spin.to_degrees(),"facing_degrees":room.yaw.to_degrees(),"virtual_turn_degrees":room.virtual_turn.to_degrees(),"live_frames":room.live_frames,"animations_seen":room.animations_seen,"clips_seen":room.clips_seen,"clip":room.clip,"clip_speed":room.clip_speed,"fixed_ground":fixed_ground,"reason":room.reason,"character_loaded":clips.is_some(),"calibration_preview":launch.calibration,"procedural_strafe":{"active":stride.active,"bones":stride.bones,"left":stride.left,"right":stride.right,"lean":stride.lean,"residual_offsets":stride.residual}});
             let _=std::fs::write(path,serde_json::to_vec_pretty(&value).unwrap());
         }
         launch.reported=true;
@@ -818,7 +881,7 @@ mod connection_regressions {
     #[test]
     fn reset_field_references_current_heading_and_restores_view() {
         let mut room = Room { paused:false, yaw:0., raw_yaw:0., heading_origin:0., virtual_turn:0., generation:None,
-            jump:JumpState::default(), jump_test:false, clip:"Idle_Loop", clip_speed:1., clips_seen:Vec::new(), anim:String::new(), speed:0., max_walk_speed:0., max_sprint_speed:0., local:Vec2::ZERO, reason:String::new(), last_stamp:None,
+            jump:JumpState::default(), jump_test:false, clip:"Idle_Loop", clip_speed:1., clips_seen:Vec::new(), anim:String::new(), speed:0., max_walk_speed:0., max_sprint_speed:0., local:Vec2::ZERO, visual_local:Vec2::ZERO,body_lean:Vec2::ZERO,lean_min:Vec2::ZERO,lean_max:Vec2::ZERO,foot_pose:[0.;2],foot_pose_max:[0.;2],foot_direct:false,foot_profiles:0,foot_running:false,reason:String::new(), last_stamp:None,
             stamp_changed:Instant::now(), camera_yaw:2., camera_pitch:0.8, started:Instant::now(),
             seconds:None, parent:None, parent_check:Instant::now(), distance:5., spin:0., live_frames:0, animations_seen:vec![] };
         let mut avatar = Transform::from_xyz(3., 0., 4.);
@@ -985,6 +1048,8 @@ mod tests {
     #[test]
     fn mode_scaling() {
         let v = serde_json::json!({"movement_engine":"body_tilt_steps","locomotion":{"preview":{"speed":0.5}},"actions":{"preview":{"travel_xy":[0.4,-0.8],"speed_multiplier":0.5}}});
+        assert!((motion(&v) - Vec2::new(0.1, -0.2)).length() < 0.0001);
+        let v = serde_json::json!({"movement_engine":"body_tilt_steps","step_input":"feet","game_output_preview":{"travel_xy":[0,0],"armed":false},"locomotion":{"preview":{"speed":0.5}},"actions":{"preview":{"travel_xy":[0.4,-0.8],"speed_multiplier":0.5}}});
         assert!((motion(&v) - Vec2::new(0.1, -0.2)).length() < 0.0001);
     }
 }

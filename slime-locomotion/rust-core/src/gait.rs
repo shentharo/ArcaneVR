@@ -347,7 +347,11 @@ impl Engine {
         self.last_tick = t;
         if !self.fresh(t) {
             self.disarm();
-            self.heading = 0.;
+            let chest=&self.sensors[2];
+            self.heading = if self.calibrated && t>=chest.seen && t-chest.seen<self.cfg.stale {
+                crate::mounting::heading(chest.q,self.origin,if self.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]})
+                    .map(|h|h*self.cfg.sign).unwrap_or(self.heading)
+            } else {0.};
             return;
         }
         let active = self.armed && self.calibrated;
@@ -594,6 +598,16 @@ mod tests {
         e.update(2, [a.cos(), 0., a.sin(), 0.], 2.1).unwrap();
         e.tick(2.1);
         assert!((e.heading - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stale_feet_stop_speed_but_keep_fresh_chest_heading() {
+        let mut e=prepared();
+        let angle=0.4_f64;
+        e.update(2,[angle.cos(),0.,0.,angle.sin()],1.3).unwrap();
+        e.tick(1.3);
+        assert!(!e.armed);assert_eq!(e.speed,0.);
+        assert!((e.heading-0.8).abs()<1e-6);
     }
 
     #[test]

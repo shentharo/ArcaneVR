@@ -1,8 +1,8 @@
 [package]
 name = "arcane-bridge-core"
-version = "1.1.3"
+version = "1.1.7"
 edition = "2021"
-license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 default-run = "vrcraft"
 
 [dependencies]

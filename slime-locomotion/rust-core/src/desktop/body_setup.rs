@@ -468,7 +468,7 @@ mod interaction_tests {
     #[test]
     fn click_and_drag_assign_real_widget_without_network_side_effects() {
         let ctx = egui::Context::default();
-        let state = serde_json::json!({"trackers":[{"id":"10.0.0.101:0","age_ms":20.,"q":[1.,0.,0.,0.]},{"id":"192.0.2.12:0","age_ms":30.,"q":[1.,0.,0.,0.]}]});
+        let state = serde_json::json!({"trackers":[{"id":"10.0.0.101:0","age_ms":20.,"q":[1.,0.,0.,0.]},{"id":"10.0.0.12:0","age_ms":30.,"q":[1.,0.,0.,0.]}]});
         let mut selected: [String; 3] = Default::default();
         let mut picked = None;
         frame(&ctx, &state, &mut selected, &mut picked, vec![], 0.);
@@ -542,6 +542,6 @@ mod interaction_tests {
             vec![button(other_foot, false)],
             0.8,
         );
-        assert_eq!(selected[1], "192.0.2.12:0");
+        assert_eq!(selected[1], "10.0.0.12:0");
     }
 }

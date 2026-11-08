@@ -548,9 +548,13 @@ impl ActionProcessor {
     pub fn has_fresh_head(input: &Input) -> bool { hmd(input).is_some() }
     pub fn process_chest_preview(&mut self, input: &Input) -> Telemetry {
         let decouple = self.settings.direction.decouple;
+        let enabled = self.settings.direction.enabled;
         self.settings.direction.decouple = false;
-        let result = self.process(input);
+        self.settings.direction.enabled = true;
+        let mut result = self.process(input);
         self.settings.direction.decouple = decouple;
+        self.settings.direction.enabled = enabled;
+        if !enabled {result.travel_xy=[0.,0.];}
         result
     }
     pub fn calibrate(&mut self, i: &Input) -> Result<(), &'static str> {

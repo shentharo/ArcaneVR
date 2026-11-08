@@ -186,8 +186,8 @@ mod tests {
     }
     #[test]
     fn discovery_identity_is_bounded_and_unicast() {
-        let mut b=vec![0;28]; b.push(3);b.extend(b"0.7");b.extend([0x02,0x00,0x00,0x82,0x6c,0x63,1]);
-        assert_eq!(discovery_mac(&b).as_deref(),Some("02:00:00:82:6C:63"));
+        let mut b=vec![0;28]; b.push(3);b.extend(b"0.7");b.extend([0x1c,0x8f,0x57,0x82,0x6c,0x63,1]);
+        assert_eq!(discovery_mac(&b).as_deref(),Some("1C:8F:57:82:6C:63"));
         for n in 0..38 { assert!(discovery_mac(&b[..n]).is_none()); }
         b[32]=1; assert!(discovery_mac(&b).is_none());
     }
