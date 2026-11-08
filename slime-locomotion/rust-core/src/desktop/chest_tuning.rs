@@ -101,12 +101,21 @@ fn fit_rings(d:&mut Value,view:f64)->bool {
  for key in ["max_angle","horizontal_max_angle","forward_max_angle","deadzone","forward_deadzone","backward_deadzone","left_deadzone","right_deadzone"] {if let Some(v)=d[key].as_f64(){d[key]=json!(v*factor);}}
  d["sprint_angle"]=json!(sprint*factor);true
 }
-pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,fresh:bool,details:bool)->bool {
+#[derive(Debug, PartialEq)]
+struct OutputMeter { x: f32, y: f32, sprint: bool, armed: bool }
+fn output_meter(state:&Value, online:bool, fresh:bool)->Option<OutputMeter> {
+ if !online || !fresh { return None; }
+ let output=&state["game_output_preview"];
+ let xy=output["travel_xy"].as_array()?;
+ let axis=|i:usize| xy.get(i)?.as_f64().filter(|v|v.is_finite()).map(|v|v.clamp(-1.,1.) as f32);
+ Some(OutputMeter {x:axis(0)?, y:axis(1)?, sprint:output["buttons"].as_u64()? & 4 != 0, armed:output["armed"].as_bool()?})
+}
+pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,state:&Value,online:bool,fresh:bool,details:bool)->bool {
  let mut changed=check(ui,d,"sprint_full_forward","Sprint");
  let mut full_x=d["horizontal_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full_y=d["forward_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full=full_x.max(full_y);let mut sprint=d["sprint_angle"].as_f64().unwrap_or((full*1.15).min(3.14)).max(full);
- let side=ui.available_width().min(640.).max(160.);let (area,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),side),egui::Sense::click_and_drag());let p=ui.painter().clone();let c=area.center();let mut radius=side*0.39;
+ let side=ui.available_width().min(640.).max(160.);let (area,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),side),egui::Sense::click_and_drag());let p=ui.painter().clone();let c=area.center();let mut radius=(side*0.39).min((side*0.5-40.).max(20.));
  // The outer boundary keeps all editable thresholds visible.
  let zoom_key=ui.make_persistent_id("lean_ring_zoom");
  let start_key=ui.make_persistent_id("lean_ring_zoom_start");
@@ -157,6 +166,40 @@ pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,
  let yc=egui::pos2(area.right()-28.,area.top()+26.);p.circle_stroke(yc,18.,Stroke::new(1.,MUTED));
  if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64(){p.line_segment([yc,yc+egui::vec2(yaw.sin() as f32,-yaw.cos() as f32)*15.],Stroke::new(2.,CYAN));}}
  p.text(yc+egui::vec2(0.,23.),egui::Align2::CENTER_TOP,"YAW",egui::FontId::proportional(10.),MUTED);
+ // The bars show final receiver stick output; the rings above are lean angles.
+ let meter=output_meter(state,online,fresh);
+ let bar_color=Color32::from_rgb(64,220,229);
+ let horizontal=egui::Rect::from_center_size(egui::pos2(c.x,c.y+radius+28.),egui::vec2(radius*1.6,10.));
+ let vertical=egui::Rect::from_center_size(egui::pos2(c.x+radius+28.,c.y),egui::vec2(10.,radius*1.6));
+ for r in [horizontal,vertical] {p.rect_filled(r,3.,Color32::from_rgb(48,65,80));}
+ if let Some(m)=&meter {
+  let h=egui::pos2(horizontal.center().x+m.x*horizontal.width()*0.5,horizontal.center().y);
+  let v=egui::pos2(vertical.center().x,vertical.center().y-m.y*vertical.height()*0.5);
+  p.line_segment([horizontal.center(),h],Stroke::new(7.,bar_color));p.circle_filled(h,5.,bar_color);
+  p.line_segment([vertical.center(),v],Stroke::new(7.,bar_color));p.circle_filled(v,5.,bar_color);
+ }
+ p.line_segment([horizontal.center_top(),horizontal.center_bottom()],Stroke::new(1.,Color32::WHITE));
+ p.line_segment([vertical.left_center(),vertical.right_center()],Stroke::new(1.,Color32::WHITE));
+ // Adjacent thin guides have the ring's angular scale, distinct from stick output.
+ let hy=horizontal.top()-6.;let vx=vertical.right()+6.;
+ p.line_segment([egui::pos2(horizontal.left(),hy),egui::pos2(horizontal.right(),hy)],Stroke::new(1.,MUTED));
+ p.line_segment([egui::pos2(vx,vertical.top()),egui::pos2(vx,vertical.bottom())],Stroke::new(1.,MUTED));
+ let hx=|angle:f64| horizontal.center().x+(angle/view).clamp(-1.,1.) as f32*horizontal.width()*0.5;
+ let vy=|angle:f64| vertical.center().y-(angle/view).clamp(-1.,1.) as f32*vertical.height()*0.5;
+ for angle in [-values[2],values[3]] {let x=hx(angle);p.line_segment([egui::pos2(x,hy-3.),egui::pos2(x,hy+3.)],Stroke::new(2.,ORANGE));}
+ for angle in [-values[1],values[0]] {let y=vy(angle);p.line_segment([egui::pos2(vx-3.,y),egui::pos2(vx+3.,y)],Stroke::new(2.,ORANGE));}
+ for angle in [-full_y,full_y] {let y=vy(angle);p.line_segment([egui::pos2(vx-3.,y),egui::pos2(vx+3.,y)],Stroke::new(2.,green));}
+ if d["sprint_full_forward"]==true {let y=vy(sprint);p.line_segment([egui::pos2(vx-3.,y),egui::pos2(vx+3.,y)],Stroke::new(2.,purple));}
+
+ p.text(horizontal.center_bottom()+egui::vec2(0.,3.),egui::Align2::CENTER_TOP,"L -100%    0    +100% R",egui::FontId::proportional(10.),MUTED);
+ p.text(vertical.center_top()+egui::vec2(0.,-2.),egui::Align2::CENTER_BOTTOM,"F 100%",egui::FontId::proportional(10.),MUTED);
+ p.text(vertical.center_bottom()+egui::vec2(0.,2.),egui::Align2::CENTER_TOP,"B 100%",egui::FontId::proportional(10.),MUTED);
+ match meter {
+  Some(m)=>{ui.label(format!("{} · stick L/R {:+.0}% · F/B {:+.0}% · Sprint button {}",if m.armed {"Movement preview · game output armed"} else {"Movement preview · game output stopped"},m.x*100.,m.y*100.,if m.sprint {"ON"}else{"OFF"}));}
+  None=>{ui.label(if !online {"Receiver offline · stick output unavailable"} else if !fresh {"Chest sensor offline / stale · stick output unavailable"} else {"Receiver output unavailable"});}
+ }
+ ui.small(format!("Lean input deadzone (draft): F {:.1}° / B {:.1}° / L {:.1}° / R {:.1}° · ring range {:.1}°",values[0].to_degrees(),values[1].to_degrees(),values[2].to_degrees(),values[3].to_degrees(),view.to_degrees()));
+ ui.small("Bars: signed stick output; 100% is full stick. Thin guides: lean angles on the ring scale (orange deadzone, green full, purple sprint). Sprint is a separate button; game speed depends on the game.");
  if details {ui.horizontal_wrapped(|ui|{for (i,label) in ["F","B","L","R"].into_iter().enumerate(){ui.label(label);let mut angle=values[i].to_degrees();let limit=if i<2{full_y}else{full_x};if ui.add(egui::DragValue::new(&mut angle).range(0.0..=(limit-0.003).max(0.).to_degrees()).speed(0.1).suffix("°")).changed(){set_deadzone(d,&mut values,i,angle.to_radians());changed=true;}}});}
  ui.small("Orange: deadzone (0 speed) · Green: full speed · Purple: sprint. Drag the coloured handles. Shrink FORWARD to bring all rings inward; Apply to save.");
  if details {ui.label(format!("Full speed {:.1}° · Sprint {:.1}°",full.to_degrees(),sprint.to_degrees()));ui.small("Speed rises from zero at the deadzone edge to full speed at the green ring. Sprint cannot be inside full speed. Apply to save.");}
@@ -170,7 +213,7 @@ impl ChestTuning {
   if self.pending.as_ref().is_some_and(|p|p==saved) { self.pending=None; self.dirty=false; }
   if !self.dirty && self.pending.is_none() && saved.is_object(){self.draft=saved.clone();}
   let fresh=online && s["roles"]["torso"]["fresh"]==true;
-  let preview=&s["actions"]["preview"]; let xy=preview["travel_xy"].as_array();
+  let preview=&s["actions"]["preview"]; let xy=s["game_output_preview"]["travel_xy"].as_array();
   let x=xy.and_then(|a|a.first()).map(number).unwrap_or(0.) as f32; let y=xy.and_then(|a|a.get(1)).map(number).unwrap_or(0.) as f32;
   if self.last_sample.is_none_or(|t|t.elapsed()>=Duration::from_millis(100)) {self.last_sample=Some(Instant::now()); self.history.push(if fresh {y} else {0.}); if self.history.len()>100 {self.history.remove(0);} }
   let mut action=None;
@@ -212,14 +255,14 @@ impl ChestTuning {
    ui.allocate_ui_with_layout(egui::vec2(width*0.49, 0.),egui::Layout::top_down(egui::Align::Min),|ui|{pages::card(ui,"Live lean preview",|ui|{
     ui.label(format!("Calibration: {}",preview["direction_status"].as_str().unwrap_or("waiting")));
     ui.horizontal_wrapped(|ui|{if ui.add_enabled(fresh&&!busy,egui::Button::new("Reset center · instant")).clicked(){action=Some(Action::ResetCenter);}if ui.add_enabled(fresh&&!busy,egui::Button::new("Calibrate sensor")).clicked(){action=Some(Action::SensorCalibration);}if ui.button("Open test room").clicked(){action=Some(Action::TestRoom);}});
-    if self.draft.is_object(){self.dirty|=target(ui,&mut self.draft["direction"],&saved["direction"],preview,fresh,true);}
+    if self.draft.is_object(){self.dirty|=target(ui,&mut self.draft["direction"],&saved["direction"],preview,s,online,fresh,true);}
     if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64().filter(|v|v.is_finite()){ui.label(format!("Chest rotation around vertical axis: {:.1}°",yaw.to_degrees()));}else{ui.label("Chest rotation unavailable");}}else{ui.label("Chest rotation unavailable");}
-    ui.small(if fresh {format!("Saved output  X {x:.2}   Y {y:.2}")}else{"Preview unavailable until chest data is fresh".to_owned()});
+    ui.small(if fresh {format!("Receiver movement preview  X {x:.2}   Y {y:.2}")}else{"Preview unavailable until chest data is fresh".to_owned()});
     ui.label("Forward / backward output history · −1 to +1 stick"); let (r,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),65.),egui::Sense::hover()); let p=ui.painter_at(r);p.rect_filled(r,5.,Color32::from_rgb(12,25,37));for (i,w) in self.history.windows(2).enumerate(){let at=|j:usize,v:f32|egui::pos2(r.left()+r.width()*j as f32/99.,r.center().y-v.clamp(-1.,1.)*r.height()*0.45);p.line_segment([at(i,w[0]),at(i+1,w[1])],Stroke::new(1.5,CYAN));}
     ui.label(format!("Response curve · 0° to {:.1}° · 0–100% stick",saved["direction"]["forward_max_angle"].as_f64().unwrap_or(number(&saved["direction"]["max_angle"])).to_degrees()));let (r,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),85.),egui::Sense::hover());let p=ui.painter_at(r);p.rect_filled(r,5.,Color32::from_rgb(12,25,37));let d=&saved["direction"];let dead=deadzones(d)[0];let max=d["forward_max_angle"].as_f64().unwrap_or(number(&d["max_angle"])).max(dead+0.001);let exponent=number(&d["exponent"]).max(0.1);let out=number(&d["max_output"]).clamp(0.,1.);for i in 0..99 {let point=|j:usize|{let t=j as f64/99.;let v=((t*max-number(&d["forward_offset"])-dead)/(max-dead)).clamp(0.,1.).powf(exponent)*out;egui::pos2(r.left()+t as f32*r.width(),r.bottom()-v as f32*r.height())};p.line_segment([point(i),point(i+1)],Stroke::new(2.,ORANGE));}
    });});
    ui.allocate_ui_with_layout(egui::vec2((width*0.19-16.).max(100.), 0.),egui::Layout::top_down(egui::Align::Min),|ui|{pages::card(ui,"Speed",|ui|{
-    let cap=number(&saved["direction"]["max_output"]).max(0.05) as f32;let magnitude=(x*x+y*y).sqrt();ui.label(format!("{:.0}% output",if fresh {magnitude*100.}else{0.}));ui.small("Live stick magnitude");let (r,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),160.),egui::Sense::hover());let p=ui.painter_at(r);p.rect_filled(r,5.,Color32::from_rgb(12,25,37));let track=egui::Rect::from_center_size(r.center(),egui::vec2(32.,r.height()-24.));p.rect_filled(track,6.,Color32::from_rgb(42,56,70));if fresh {let bar=egui::Rect::from_min_max(egui::pos2(track.left(),track.bottom()-track.height()*(magnitude/cap).clamp(0.,1.)),track.right_bottom());p.rect_filled(bar,6.,CYAN);}ui.small(if fresh {"Receiver preview"}else{"Waiting for sensor"});
+    let cap=1.0_f32;let magnitude=(x*x+y*y).sqrt();ui.label(format!("{:.0}% output",if fresh {magnitude*100.}else{0.}));ui.small("Receiver stick magnitude");let (r,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),160.),egui::Sense::hover());let p=ui.painter_at(r);p.rect_filled(r,5.,Color32::from_rgb(12,25,37));let track=egui::Rect::from_center_size(r.center(),egui::vec2(32.,r.height()-24.));p.rect_filled(track,6.,Color32::from_rgb(42,56,70));if fresh {let bar=egui::Rect::from_min_max(egui::pos2(track.left(),track.bottom()-track.height()*(magnitude/cap).clamp(0.,1.)),track.right_bottom());p.rect_filled(bar,6.,CYAN);}ui.small(if fresh {"Movement preview"}else{"Waiting for sensor"});
     ui.separator();ui.label("Input-angle guides · draft");let dir=&self.draft["direction"];let dz=deadzones(dir);let maxx=dir["horizontal_max_angle"].as_f64().unwrap_or(number(&dir["max_angle"])).max(0.01);let maxy=dir["forward_max_angle"].as_f64().unwrap_or(number(&dir["max_angle"])).max(0.01);let angles=adjusted_angles(preview,&saved["direction"],fresh).map(|[x,y]|[y,x]);for (i,name) in ["Forward","Back","Left","Right"].into_iter().enumerate(){let limit=if i<2{maxy}else{maxx};ui.label(format!("{name}  {:.1}° / {:.1}°",dz[i].to_degrees(),limit.to_degrees()));let (r,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),8.),egui::Sense::hover());let p=ui.painter_at(r);p.line_segment([r.left_center(),r.right_center()],Stroke::new(3.,Color32::from_rgb(55,75,90)));let threshold=r.left()+r.width()*(dz[i]/limit).clamp(0.,1.) as f32;p.line_segment([egui::pos2(threshold,r.top()),egui::pos2(threshold,r.bottom())],Stroke::new(2.,ORANGE));if let Some(angles)=angles {let v=match i{0=>angles[0].max(0.),1=>(-angles[0]).max(0.),2=>(-angles[1]).max(0.),_=>angles[1].max(0.)};let x=r.left()+r.width()*(v/limit).clamp(0.,1.) as f32;p.circle_filled(egui::pos2(x,r.center().y),3.,CYAN);}}ui.small("Orange: draft deadzone · cyan: saved-offset-adjusted live angle. Meter above: stick output.");
    });});
   }); action
@@ -229,10 +272,16 @@ impl ChestTuning {
 
 #[cfg(test)] mod tests {
  use super::*;
+ #[test] fn output_meter_uses_final_receiver_values_and_requires_fresh_data() {
+  let state=json!({"actions":{"preview":{"travel_xy":[0.9,0.9]}},"game_output_preview":{"travel_xy":[-0.25,0.75],"buttons":4,"armed":false}});
+  assert_eq!(output_meter(&state,true,true),Some(OutputMeter{x:-0.25,y:0.75,sprint:true,armed:false}));
+  assert_eq!(output_meter(&state,false,true),None);assert_eq!(output_meter(&state,true,false),None);
+  assert_eq!(output_meter(&json!({"game_output_preview":{"travel_xy":[0,0]}}),true,true),None);
+ }
  #[test] fn outer_forward_drag_fits_thresholds_inside_boundary() {
   let ctx=egui::Context::default();let mut d=arcane_bridge_core::actions::Settings::default().to_json()["direction"].clone();let original=d.clone();
   let mut frame=|events:Vec<egui::Event>| {
-   let mut zoom=0.;let output=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(600.,800.))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{target(ui,&mut d,&original,&json!({}),false,false);zoom=ui.data(|data|data.get_temp::<f64>(ui.make_persistent_id("lean_ring_zoom"))).unwrap();});});
+   let mut zoom=0.;let output=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(600.,800.))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{target(ui,&mut d,&original,&json!({}),&json!({}),false,false,false);zoom=ui.data(|data|data.get_temp::<f64>(ui.make_persistent_id("lean_ring_zoom"))).unwrap();});});
    let top=output.shapes.iter().find_map(|s|if let egui::Shape::Circle(c)=&s.shape {if c.radius==7. && c.fill==CYAN {Some(c.center)}else{None}}else{None}).unwrap();(top,zoom)
   };
   let (top,before)=frame(vec![]);

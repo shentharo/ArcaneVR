@@ -74,7 +74,7 @@ impl ActionPages {
         let saved = &state["actions"]["settings"];
         if !self.dirty && saved.is_object() { self.draft = saved.clone(); }
         if !self.draft.is_object() { ui.label("Waiting for direction settings"); return None; }
-        self.dirty |= super::chest_tuning::target(ui, &mut self.draft["direction"], &saved["direction"], &state["actions"]["preview"], state["roles"]["torso"]["fresh"] == true, details);
+        self.dirty |= super::chest_tuning::target(ui, &mut self.draft["direction"], &saved["direction"], &state["actions"]["preview"], state, online, online && state["roles"]["torso"]["fresh"] == true, details);
         if details {
             ui.label(if self.dirty { "Unsaved deadzone" } else { "Drag orange points to adjust deadzone" });
         }
