@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, process::Command, sync::mpsc, thread};
 
 const INSTALLER: &str = include_str!("update_install.ps1");
-const API: &str = "https://api.github.com/repos/shentharo/VRCRAFT/releases/latest";
+const API: &str = "https://api.github.com/repos/shentharo/ArcaneVR/releases/latest";
 
 enum Event { Checked(Result<Option<Release>, String>), Staged(Result<PathBuf, String>) }
 pub struct Updater {

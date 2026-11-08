@@ -59,11 +59,11 @@ impl ImageFlow{
 
 #[derive(Clone)]
 struct Snapshot {state:Value,online:bool,deadline:Option<Instant>,message:String}
-impl Default for Snapshot {fn default()->Self{Self{state:Value::Null,online:false,deadline:None,message:"Connecting to VRCraft...".into()}}}
+impl Default for Snapshot {fn default()->Self{Self{state:Value::Null,online:false,deadline:None,message:"Connecting to ArcaneVR...".into()}}}
 #[derive(Clone,Copy,Debug,PartialEq)]
 enum Action {Calibrate,Reset,Stop}
 fn request(port:u16,command:Option<&str>)->Result<Value,String> {
-    let mut stream=TcpStream::connect_timeout(&([127,0,0,1],port).into(),Duration::from_millis(200)).map_err(|_|"VRCraft receiver offline".to_string())?;
+    let mut stream=TcpStream::connect_timeout(&([127,0,0,1],port).into(),Duration::from_millis(200)).map_err(|_|"ArcaneVR receiver offline".to_string())?;
     stream.set_read_timeout(Some(Duration::from_millis(400))).map_err(|e|e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_millis(200))).map_err(|e|e.to_string())?;
     let body=command.map(|c|json!({"command":c}).to_string()).unwrap_or_default();
@@ -120,7 +120,7 @@ impl Bitmap {
 fn render(s:&Snapshot,hover:Option<Action>)->Bitmap{
     let mut b=Bitmap::new();
     b.rect(Area{x:0,y:0,w:W,h:7},MINT);
-    b.text(32,29,"VRCraft",5,WHITE);
+    b.text(32,29,"ArcaneVR",5,WHITE);
     b.text(34,80,"IN-HEADSET CONTROLS",2,MINT);
     let status=if !s.online{"RECEIVER OFFLINE"}else if s.state["armed"]==true{"MOVEMENT ARMED"}else if s.state["calibrated"]==true{"CALIBRATED / STOPPED"}else{"STOPPED / CALIBRATION NEEDED"};
     b.text(34,121,status,2,if s.online{MINT}else{[242,176,107,255]});

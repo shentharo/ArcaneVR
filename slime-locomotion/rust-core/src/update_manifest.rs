@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-const REPOSITORY: &str = "shentharo/VRCRAFT";
+const REPOSITORY: &str = "shentharo/ArcaneVR";
 const ASSET_NAME: &str = "ArcaneVR.exe";
 const MAX_ASSET_SIZE: u64 = 200 * 1024 * 1024;
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");

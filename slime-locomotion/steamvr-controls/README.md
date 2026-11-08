@@ -1,6 +1,6 @@
-# VRCraft SteamVR dashboard controls
+# ArcaneVR SteamVR dashboard controls
 
-Native Windows x64 Rust companion; creates the `VRCraft` SteamVR dashboard tab under overlay key `dev.vrcraft.controls`. CPU RGBA rendering is submitted through `SetOverlayRaw`; controller pointer events come from `PollNextOverlayEvent`. No Python, browser, scene app, or GPU graphics context.
+Native Windows x64 Rust companion; creates the `ArcaneVR` SteamVR dashboard tab under overlay key `dev.vrcraft.controls`. CPU RGBA rendering is submitted through `SetOverlayRaw`; controller pointer events come from `PollNextOverlayEvent`. No Python, browser, scene app, or GPU graphics context.
 
 Build: `cargo +1.95.0 build --release`. Run `target/release/vrcraft-steamvr-controls.exe` from the desktop app using a hidden child process. Place Valve's `openvr_api.dll` alongside it when packaging. Development also finds the checked-in `../openvr/bin/win64/openvr_api.dll`; the standard SteamVR install path is a final fallback. The Valve header in `../openvr/headers/openvr_capi.h` is required at build time and generates the exact `IVROverlay_028` function-table layout.
 

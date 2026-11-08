@@ -1,4 +1,4 @@
-# ArcaneVR / VRCraft
+# ArcaneVR
 
 I was frustrated that the VR movement options I tried did not match what I wanted, so I decided to create my own. My aim is to make movement feel natural and give people control over how it works.
 
