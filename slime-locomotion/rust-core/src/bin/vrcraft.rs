@@ -475,8 +475,8 @@ impl eframe::App for ArcaneVR {
                     if ui.add_enabled(enabled || can_enable, movement_button).clicked() {
                         if !enabled { self.send(json!({"command":"arm"})); } else { self.walking=false; self.test_room.stop(); self.send(json!({"command":"stop"})); }
                     }
-                    if self.page != Page::TestRoom { install_update = self.updater.show(ctx, ui, status.online && !busy && s["armed"] != true); }
                     if ui.selectable_label(matches!(self.page, Page::QuickSetup | Page::Devices), "Sensors").clicked() { self.page = Page::QuickSetup; }
+                    install_update = self.updater.show(ctx, ui, status.online && !busy && s["armed"] != true);
                     let drag_width = (ui.available_width() - 110.).max(0.);
                     let (_, drag) = ui.allocate_exact_size(egui::vec2(drag_width, 30.), egui::Sense::click_and_drag());
                     if drag.drag_started() { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag); }
@@ -609,6 +609,12 @@ impl eframe::App for ArcaneVR {
                             self.walking=false;self.send(json!({"command":"stop"}));
                             let result=std::env::current_exe().ok().and_then(|exe|std::process::Command::new(exe).arg("--force-steam-home").status().ok());
                             let message=if result.is_some_and(|s|s.success()){ "SteamVR Home requested. The current VR game may close." }else{"Could not request SteamVR Home. Check that SteamVR is running."};
+                            ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("force_home_result"),message.to_string()));
+                        },
+                        home_dashboard::Action::BoundarySetup=>{
+                            self.walking=false;self.send(json!({"command":"stop"}));
+                            let result=std::env::current_exe().ok().and_then(|exe|std::process::Command::new(exe).arg("--steam-room-setup").status().ok());
+                            let message=if result.is_some_and(|s|s.success()){ "SteamVR Room Setup requested; Quest boundary may require headset settings." }else{"Could not open SteamVR Room Setup. Check SteamVR and use Quest boundary settings."};
                             ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("force_home_result"),message.to_string()));
                         },
                         home_dashboard::Action::SetMovement(enabled)=>{if enabled {self.send(json!({"command":"arm"}));} else {self.walking=false;self.test_room.stop();self.send(json!({"command":"stop"}));}},
@@ -817,7 +823,7 @@ impl eframe::App for ArcaneVR {
         }
     }
 }
-fn force_steam_home()->Result<(),String>{unsafe {
+fn launch_steam_tool(key:&std::ffi::CStr)->Result<(),String>{unsafe {
  let dll=std::path::PathBuf::from("C:/Program Files (x86)/Steam/steamapps/common/SteamVR/bin/win64/openvr_api.dll");
  let lib=libloading::Library::new(dll).map_err(|e|e.to_string())?;
  let init=*lib.get::<unsafe extern "C" fn(*mut i32,i32)->u32>(b"VR_InitInternal\0").map_err(|e|e.to_string())?;
@@ -827,11 +833,12 @@ fn force_steam_home()->Result<(),String>{unsafe {
  let table=get(c"FnTable:IVRApplications_008".as_ptr(),&mut error) as *const usize;
  if error!=0 || table.is_null(){shutdown();return Err(format!("SteamVR applications interface {error}"));}
  let launch:unsafe extern "system" fn(*const std::ffi::c_char)->i32=std::mem::transmute(*table.add(6));
- let code=launch(c"openvr.tool.steamvr_environments".as_ptr());shutdown();
+ let code=launch(key.as_ptr());shutdown();
  if code==0 || code==106 {Ok(())}else{Err(format!("SteamVR launch error {code}"))}
 }}
 fn main() -> eframe::Result {
-    if std::env::args().any(|a|a=="--force-steam-home"){std::process::exit(if force_steam_home().is_ok(){0}else{1});}
+    if std::env::args().any(|a|a=="--force-steam-home"){std::process::exit(if launch_steam_tool(c"openvr.tool.steamvr_environments").is_ok(){0}else{1});}
+    if std::env::args().any(|a|a=="--steam-room-setup"){std::process::exit(if launch_steam_tool(c"openvr.tool.steamvr_room_setup").is_ok(){0}else{1});}
     let qa = qa_capture::path().is_some();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

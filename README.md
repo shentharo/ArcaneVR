@@ -14,7 +14,8 @@ I started with **one SlimeVR-compatible chest sensor** to get the foundations wo
 - **Calibration:** guided chest sensor mounting calibration and a recenter control; jump and crouch learning and tuning are also available.
 - **Sensor setup:** assign sensors to body positions, see connection status and use the USB Wi-Fi setup for compatible SlimeVR trackers.
 - **Profiles:** save, load, import and export movement settings locally, including game-specific profiles. Community profiles are not available yet.
-- **SteamVR integration:** a virtual locomotion device, controller and headset status, and an optional dashboard overlay. Game compatibility and bindings vary.
+- **SteamVR integration:** a virtual locomotion device, controller and headset status, an optional dashboard overlay, and a button to return to SteamVR Home. Game compatibility and bindings vary.
+- **Boundary setup:** opens SteamVR Room Setup. This does not automatically move the Quest safety boundary; adjust the Quest boundary in the headset when required.
 - **Three- and five-sensor layouts:** selectable in the app; foot-based walking and additional sensor support remain a work in progress.
 - **Updates:** check for published GitHub releases from the app. See the update limitations below.
 

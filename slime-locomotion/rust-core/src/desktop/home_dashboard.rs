@@ -7,7 +7,7 @@ const BORDER: Color32 = Color32::from_rgb(43, 60, 77);
 const TEXT: Color32 = Color32::from_rgb(235, 241, 247);
 const SUB: Color32 = Color32::from_rgb(161, 179, 194);
 
-pub enum Action { Navigate(Page), Command(Value), Edit, Done, ResetCenter, SensorCalibration, SetMovement(bool), ForceSteamHome }
+pub enum Action { Navigate(Page), Command(Value), Edit, Done, ResetCenter, SensorCalibration, SetMovement(bool), ForceSteamHome, BoundarySetup }
 
 fn sensor_status(state: &Value, role: &str, online: bool) -> &'static str {
     if !online { return "Receiver offline"; }
@@ -160,11 +160,6 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
         text_at(78.,675.,status,if status.len()>37 {16.}else{19.},col);
     }
     if !is_ready {paint.rect_filled(banner,12.,Color32::from_black_alpha((35.*pulse) as u8));}
-    let force=box_at(714.,76.,172.,42.);
-    paint.rect_filled(force,7.,Color32::from_rgb(18,46,62));paint.rect_stroke(force,7.,Stroke::new(1.,pages::MINT),egui::StrokeKind::Inside);
-    paint.text(force.center(),egui::Align2::CENTER_CENTER,"Force Steam Home",egui::FontId::proportional(15.*scale),pages::MINT);
-    if hit("Force Steam Home",force,true).on_hover_text("Exit the current VR game and return to SteamVR Home; unsaved progress may be lost.").clicked(){action=Some(Action::ForceSteamHome);}
-    if let Some(message)=ui.ctx().data(|d|d.get_temp::<String>(egui::Id::new("force_home_result"))) {paint.text(pos(714.,130.),egui::Align2::LEFT_TOP,message,egui::FontId::proportional(12.*scale),pages::MINT);}
     let calibrate=online && all && !_busy;
     if hit("Recenter",box_at(434.,76.,111.,42.),calibrate && state["calibration_ready"]==true).clicked(){action=Some(Action::ResetCenter);}
     let tilt=matches!(state["movement_engine"].as_str(),Some("body_tilt"|"body_tilt_steps"));
@@ -172,6 +167,15 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
     let armed=state["armed"]==true;
     if armed {paint.circle_filled(pos(159.,451.),7.*scale,pages::MINT);}
     if hit("Game movement",box_at(145.,434.,215.,36.),armed||can_enable).clicked(){action=Some(Action::SetMovement(!armed));}
+    let boundary=box_at(365.,431.,125.,36.);
+    paint.rect_filled(boundary,8.,Color32::from_rgb(22,44,57));paint.rect_stroke(boundary,8.,Stroke::new(1.,Color32::from_rgb(56,143,164)),egui::StrokeKind::Inside);
+    paint.text(boundary.center(),egui::Align2::CENTER_CENTER,"Boundary setup",egui::FontId::proportional(14.*scale),pages::MINT);
+    if hit("Boundary setup",boundary,true).on_hover_text("Open SteamVR Room Setup. Quest boundaries may need to be adjusted in the headset.").clicked(){action=Some(Action::BoundarySetup);}
+    let force=box_at(145.,471.,345.,31.);
+    paint.rect_filled(force,8.,Color32::from_rgb(15,37,51));paint.rect_stroke(force,8.,Stroke::new(1.,Color32::from_rgb(56,143,164)),egui::StrokeKind::Inside);
+    paint.text(force.center(),egui::Align2::CENTER_CENTER,"↩  Return to SteamVR Home",egui::FontId::proportional(15.*scale),pages::MINT);
+    if hit("Force Steam Home",force,true).on_hover_text("Exit the current VR game and return to SteamVR Home; unsaved progress may be lost.").clicked(){action=Some(Action::ForceSteamHome);}
+    if let Some(message)=ui.ctx().data(|d|d.get_temp::<String>(egui::Id::new("force_home_result"))) {paint.text(pos(60.,714.),egui::Align2::LEFT_BOTTOM,message,egui::FontId::proportional(12.*scale),pages::MINT);}
     // Replace the baked-in action buttons with a live connection strip.
     paint.rect_filled(box_at(66.,510.,426.,98.),10.,Color32::from_rgb(13,29,40));
     let devices=[("Sensors",Some(online && all)),("SteamVR",Some(online && state["steamvr"]["driver_connected"]==true)),("Quest 3",Some(online && state["hmd_pose"]["fresh"]==true)),("L",if online {state["controllers"]["left"].as_bool()} else {None}),("R",if online {state["controllers"]["right"].as_bool()} else {None})];
@@ -270,6 +274,8 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
         assert!(matches!(click(450.,67.),Some(Action::ResetCenter)));
         assert!(matches!(click(570.,67.),Some(Action::SensorCalibration)));
         assert!(matches!(click(130.,422.),Some(Action::SetMovement(true))));
+        assert!(matches!(click(400.,420.),Some(Action::BoundarySetup)));
+        assert!(matches!(click(270.,455.),Some(Action::ForceSteamHome)));
     }
     #[test] fn readiness_tracks_each_dependency_in_order() {
         let mut s=serde_json::json!({"mode":"live","output_mode":"steamvr","steamvr":{"driver_connected":true,"hmd_ready":true,"driver_calibrated":true},"calibrated":true,"movement_engine":"body_tilt","actions":{"preview":{"calibrated":true,"direction_status":"ready"}},"locomotion":{"input_ready":true}});
