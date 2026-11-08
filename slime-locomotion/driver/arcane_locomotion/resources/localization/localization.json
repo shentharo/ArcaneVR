@@ -1,0 +1,11 @@
+[
+  {
+    "language_tag": "en_US",
+    "arcane_locomotion": "ArcaneVR Locomotion",
+    "/input/joystick": "Move",
+    "/input/turn": "Turn",
+    "/input/jump": "Jump",
+    "/input/crouch": "Crouch",
+    "/input/sprint": "Sprint"
+  }
+]

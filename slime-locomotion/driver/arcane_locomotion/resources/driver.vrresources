@@ -1,0 +1,15 @@
+{
+  "jsonid": "vrresources",
+  "statusicons": {
+    "ArcaneVR Locomotion": {
+      "Prop_NamedIconPathDeviceOff_String": "{arcane_locomotion}/icons/status_off.png",
+      "Prop_NamedIconPathDeviceSearching_String": "{arcane_locomotion}/icons/status_searching.png",
+      "Prop_NamedIconPathDeviceSearchingAlert_String": "{arcane_locomotion}/icons/status_alert.png",
+      "Prop_NamedIconPathDeviceReady_String": "{arcane_locomotion}/icons/status_ready.png",
+      "Prop_NamedIconPathDeviceReadyAlert_String": "{arcane_locomotion}/icons/status_alert.png",
+      "Prop_NamedIconPathDeviceNotReady_String": "{arcane_locomotion}/icons/status_alert.png",
+      "Prop_NamedIconPathDeviceStandby_String": "{arcane_locomotion}/icons/status_off.png",
+      "Prop_NamedIconPathDeviceAlertLow_String": "{arcane_locomotion}/icons/status_alert.png"
+    }
+  }
+}

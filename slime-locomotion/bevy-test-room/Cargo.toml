@@ -1,0 +1,8 @@
+[package]
+name = "arcane-test-room"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_gltf", "bevy_pbr", "bevy_render", "bevy_scene", "bevy_text", "bevy_ui", "bevy_window", "bevy_winit", "default_font", "multi_threaded", "png", "x11", "tonemapping_luts", "animation"] }
+serde_json = "1"

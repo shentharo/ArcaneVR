@@ -1,0 +1,15 @@
+{
+ "jsonid":"input_profile",
+ "controller_type":"arcane_locomotion",
+ "default_bindings":[{"app_key":"steam.app.342180","binding_url":"bindings/arizona_sunshine_legacy.json"}],
+ "input_bindingui_mode":"controller_handed",
+ "input_bindingui_left":{"image":"{arcane_locomotion}/icons/binding.png","width":400,"height":300},
+ "input_bindingui_right":{"image":"{arcane_locomotion}/icons/binding.png","width":400,"height":300},
+ "input_source":{
+  "/input/joystick":{"type":"joystick","binding_image_point":[100,110],"order":1,"click":true,"touch":true},
+  "/input/turn":{"type":"joystick","binding_image_point":[300,110],"order":2,"click":true,"touch":true},
+  "/input/jump":{"type":"button","binding_image_point":[100,220],"order":3,"click":true},
+  "/input/crouch":{"type":"button","binding_image_point":[200,220],"order":4,"click":true},
+  "/input/sprint":{"type":"button","binding_image_point":[300,220],"order":5,"click":true}
+ }
+}

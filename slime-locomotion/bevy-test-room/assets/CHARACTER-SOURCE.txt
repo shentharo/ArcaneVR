@@ -1,0 +1,23 @@
+Character source: Quaternius, Universal Animation Library [Standard]
+Author: Quaternius (@Quaternius)
+Official pack page: https://quaternius.com/packs/universalanimationlibrary.html
+Official download: https://quaternius.itch.io/universal-animation-library
+Free Standard upload: 17958403 (Universal Animation Library[Standard].zip)
+Original archive member: Universal Animation Library[Standard]/Unreal-Godot/UAL1_Standard.glb
+Downloaded 2026-10-29. No payment or paid content used.
+License: CC0 1.0 Universal Public Domain Dedication
+https://creativecommons.org/publicdomain/zero/1.0/
+Bundled exact license: LICENSE-character.txt
+character.glb is the original non-root-motion file without modifications.
+
+Contents: 1 skinned humanoid mesh, 1 skin, 43 animation clips, Y-up, height about 1.829m.
+Useful exact clip names: Idle_Loop (9), Jog_Fwd_Loop (13), Sprint_Loop (36), Walk_Formal_Loop (41), Walk_Loop (42).
+The free Standard pack does not include sideways or backward locomotion clips.
+Do not describe this asset as supplying authored eight-direction locomotion.
+The runtime must document any procedural or reused-clip fallback separately.
+
+Additional attempted source: official Ultimate Animated Character Pack
+https://quaternius.com/packs/ultimatedanimatedcharacter.html
+Its official Google Drive download returned quota exceeded; no files from that pack are included.
+
+SHA256: 69591853d817488edaa8fd9bf8fc1d821eaeaf789f8627b3cd23b41c4ed67997

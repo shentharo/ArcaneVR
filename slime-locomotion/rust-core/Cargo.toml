@@ -1,0 +1,21 @@
+[package]
+name = "arcane-bridge-core"
+version = "1.1.0"
+edition = "2021"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+default-run = "vrcraft"
+
+[dependencies]
+serde_json = "1"
+libloading = "0.8"
+
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+
+serialport = { version = "4.10", default-features = false }
+base64 = "0.22"
+
+png = "0.18"
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

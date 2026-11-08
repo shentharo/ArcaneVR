@@ -1,0 +1,32 @@
+{
+  "action_manifest_version": 0,
+  "alias_info": {},
+  "app_key": "steam.app.342180",
+  "bindings": {
+    "/actions/slidinglocomotion": {
+      "sources": [
+        {
+          "path": "/user/treadmill/input/joystick",
+          "mode": "joystick",
+          "inputs": {"position": {"output": "/actions/slidinglocomotion/in/moveaxes"}}
+        },
+        {
+          "path": "/user/treadmill/input/sprint",
+          "mode": "button",
+          "inputs": {"click": {"output": "/actions/slidinglocomotion/in/sprint"}}
+        }
+      ]
+    }
+  },
+  "category": "steamvr_input",
+  "controller_type": "arcane_locomotion",
+  "description": "ArcaneVR movement for Arizona Sunshine VR Legacy sliding locomotion.",
+  "name": "ArcaneVR - Arizona Sunshine VR Legacy",
+  "options": {
+    "mirror_actions": false,
+    "returnBindingsWithLeftHand": true,
+    "returnBindingsWithRightHand": false,
+    "simulated_controller_type": "none"
+  },
+  "simulated_actions": []
+}

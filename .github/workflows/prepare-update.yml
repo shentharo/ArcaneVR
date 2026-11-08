@@ -1,0 +1,47 @@
+name: Prepare executable update
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (for example 1.1.1); must match Cargo.toml"
+        required: true
+      executable_only:
+        description: "Confirm that this release needs no changed driver, renderer, or other files"
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version and update scope
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          EXECUTABLE_ONLY: ${{ inputs.executable_only }}
+        run: |
+          if ($env:EXECUTABLE_ONLY -ne 'true') { throw 'Confirm executable-only compatibility before preparing an update.' }
+          $version = $env:RELEASE_VERSION
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be three numeric components.' }
+          $cargo = Get-Content slime-locomotion/rust-core/Cargo.toml -Raw
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"\r\n]+)"' -or $Matches[1] -ne $version) { throw 'Version must match Cargo.toml.' }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --release --manifest-path slime-locomotion/rust-core/Cargo.toml --lib --bins
+      - name: Test update installer
+        run: python slime-locomotion/rust-core/tests/test_update_install.py
+      - name: Build
+        run: cargo build --release --manifest-path slime-locomotion/rust-core/Cargo.toml --bin vrcraft
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TARGET: ${{ github.sha }}
+        run: |
+          Copy-Item slime-locomotion/rust-core/target/release/vrcraft.exe ArcaneVR.exe
+          gh release create "v$env:RELEASE_VERSION" ArcaneVR.exe --target "$env:RELEASE_TARGET" --draft --title "ArcaneVR v$env:RELEASE_VERSION" --notes "Draft: verify update installation, component compatibility and release notes before publication."
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
