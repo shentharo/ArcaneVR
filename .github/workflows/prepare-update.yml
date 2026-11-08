@@ -1,5 +1,7 @@
 name: Prepare executable update
 on:
+  push:
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       version:
@@ -20,11 +22,12 @@ jobs:
       - name: Check version and update scope
         shell: pwsh
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          EXECUTABLE_ONLY: ${{ inputs.executable_only }}
+          # A pushed release tag is the confirmation for tag-triggered builds.
+          RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          EXECUTABLE_ONLY: ${{ github.event_name == 'push' && 'true' || inputs.executable_only }}
         run: |
           if ($env:EXECUTABLE_ONLY -ne 'true') { throw 'Confirm executable-only compatibility before preparing an update.' }
-          $version = $env:RELEASE_VERSION
+          $version = $env:RELEASE_VERSION -replace '^v',''
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be three numeric components.' }
           $cargo = Get-Content slime-locomotion/rust-core/Cargo.toml -Raw
           if ($cargo -notmatch '(?m)^version\s*=\s*"([^"\r\n]+)"' -or $Matches[1] -ne $version) { throw 'Version must match Cargo.toml.' }
@@ -54,9 +57,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
           RELEASE_TARGET: ${{ github.sha }}
         run: |
+          $env:RELEASE_VERSION = $env:RELEASE_VERSION -replace '^v',''
           Copy-Item slime-locomotion/rust-core/target/release/vrcraft.exe ArcaneVR.exe
           gh release create "v$env:RELEASE_VERSION" ArcaneVR.exe --target "$env:RELEASE_TARGET" --draft --title "ArcaneVR v$env:RELEASE_VERSION" --notes "Draft: verify update installation, component compatibility and release notes before publication."
           if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
