@@ -132,7 +132,7 @@ fn animation_for(local: Vec2, relative_speed: f32, crouching: bool, jump: Option
     if local.length() < 0.015 { return (if crouching { "Crouch_Idle_Loop" } else { "Idle_Loop" }, 1.); }
     if local.x.abs() >= local.y.abs() { return (if crouching { "Crouch_Idle_Loop" } else { "Idle_Loop" },1.); }
     let backwards = local.y < -0.015;
-    let clip = if crouching { "Crouch_Fwd_Loop" } else if backwards { "Walk_Loop" } else if relative_speed > 1.01 { "Sprint_Loop" } else if relative_speed >= 0.45 { "Jog_Fwd_Loop" } else { "Walk_Loop" };
+    let clip = if crouching { "Crouch_Fwd_Loop" } else if backwards { "Walk_Loop" } else if relative_speed > 1.01 { "Sprint_Loop" } else if relative_speed >= 0.75 { "Jog_Fwd_Loop" } else { "Walk_Loop" };
     (clip, if backwards { -relative_speed.clamp(0.35, 1.4) } else { relative_speed.clamp(0.35, 1.4) })
 }
 
@@ -589,8 +589,9 @@ fn move_avatar(
     // A stale foot must stop translation, but it must not freeze the fresh
     // chest sensor's facing and lean while the user is standing still.
     let m = if v["locomotion"]["input_ready"] == true {motion(&v)} else {Vec2::ZERO};
-    room.foot_direct=v["step_input"]=="feet";
-    if room.foot_direct {
+    let feet_mode=v["step_input"]=="feet";
+    room.foot_direct=feet_mode && m.length()<0.015;
+    if feet_mode {
         let (feet,_)=foot_rig.0.update(&v,time.delta_secs());room.foot_pose=feet;room.foot_profiles=foot_rig.0.profile_count();room.foot_running=foot_rig.0.running();
         for (peak,value) in room.foot_pose_max.iter_mut().zip(feet) {*peak=peak.max(value);}
     } else {room.foot_pose=[0.;2];room.foot_running=false;}
@@ -621,6 +622,12 @@ fn move_avatar(
     let max_output = v["actions"]["settings"]["direction"]["max_output"].as_f64().filter(|v| v.is_finite() && *v > 0.).unwrap_or(1.) as f32;
     let visual_speed=if sprint {1.2}else{(room.visual_local.length()/max_output).clamp(0.,1.)};
     (room.clip, room.clip_speed) = animation_for(room.visual_local, visual_speed, v["actions"]["preview"]["crouching"] == true, room.jump.clip());
+    if feet_mode && !room.foot_direct && room.jump.clip().is_none() && v["actions"]["preview"]["crouching"]!=true {
+        if let Some(rate)=v["locomotion"]["preview"]["step_rate"].as_f64().filter(|r|r.is_finite() && *r>0.) {
+            let nominal=if room.clip=="Walk_Loop" {2.}else{3.};
+            room.clip_speed=(rate as f32/nominal).clamp(0.35,1.6)*if room.local.y<0. {-1.}else{1.};
+        }
+    }
     if room.foot_direct && room.jump.clip().is_none() && v["actions"]["preview"]["crouching"]!=true {room.clip="Idle_Loop";room.clip_speed=1.;}
     let current_clip = room.clip.to_owned();
     if !room.clips_seen.contains(&current_clip) { room.clips_seen.push(current_clip); }
@@ -707,6 +714,11 @@ fn animate(
 // Applied after the GLB's animation each frame and before transform propagation.
 // The free mannequin has no authored strafe clip; these local joint offsets layer
 // a side-step over idle (or the forward/back clip for a longitudinal diagonal).
+// The model faces +Z and is turned 180 degrees under the avatar. Positive
+// model-local Z rotation therefore bends its torso to avatar-local right.
+fn torso_lean_rotation(lean:Vec2,weight:f32,strafe:f32)->Quat {
+    Quat::from_rotation_z(lean.x*weight+strafe)*Quat::from_rotation_x(lean.y*weight)
+}
 fn procedural_strafe(
     mut commands: Commands, launch: Res<Launch>, room: Res<Room>, time: Res<Time>, mut evidence: ResMut<StrideTelemetry>,
     mut bones: Query<(Entity, &Name, &mut Transform, Option<&mut StrideOffset>), With<AnimationTarget>>,
@@ -715,7 +727,7 @@ fn procedural_strafe(
     if launch.calibration {
         for (entity,name,mut transform,offset) in &mut bones {
             let weight=match name.as_str() {"spine_01"=>0.4,"spine_02"=>0.35,"spine_03"=>0.25,_=>continue};
-            let rotation=Quat::from_rotation_z(-room.local.x*weight)*Quat::from_rotation_x(room.local.y*weight);
+            let rotation=torso_lean_rotation(room.local,weight,0.);
             transform.rotation=(transform.rotation*rotation).normalize();
             if let Some(mut previous)=offset {previous.0=rotation;} else {commands.entity(entity).insert(StrideOffset(rotation));}
             evidence.bones+=1;
@@ -729,7 +741,7 @@ fn procedural_strafe(
         if matches!(name.as_str(),"spine_01"|"spine_02"|"spine_03") {
             let weight=match name.as_str(){"spine_01"=>0.4,"spine_02"=>0.35,_=>0.25};
             let strafe=if name.as_str()=="spine_01" {pose.map_or(0.,|p|p.lean)}else{0.};
-            let rotation=Quat::from_rotation_z(-room.body_lean.x*weight+strafe)*Quat::from_rotation_x(room.body_lean.y*weight);
+            let rotation=torso_lean_rotation(room.body_lean,weight,strafe);
             transform.rotation=(transform.rotation*rotation).normalize();
             if let Some(mut previous)=offset {previous.0=rotation;} else {commands.entity(entity).insert(StrideOffset(rotation));}
             evidence.bones+=1;continue;
@@ -794,6 +806,14 @@ fn exit_checks(
     if let Some(path)=launch.series.clone() {if elapsed-launch.last_series>=0.1 {
         if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _=writeln!(file,"{}",serde_json::json!({"position":[avatar.single().translation.x,avatar.single().translation.y,avatar.single().translation.z],"speed_mps":room.speed,"paused":room.paused,"distance_m":room.distance,"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
+        }
+        if (3. ..=13.).contains(&elapsed) {
+            if let Some(dir)=std::env::var_os("ARCANEVR_QA_FILM_DIR") {
+                let dir=std::path::PathBuf::from(dir);
+                if std::fs::create_dir_all(&dir).is_ok() {
+                    commands.spawn(Screenshot::primary_window()).observe(save_to_disk(dir.join(format!("frame-{:05}.png",(elapsed*1000.) as u32))));
+                }
+            }
         }
         launch.last_series=elapsed;
     }}
@@ -1025,7 +1045,7 @@ mod tests {
     #[test]
     fn clip_selection_and_jump_edge() {
         assert_eq!(animation_for(Vec2::Y, 0.3, false, None).0, "Walk_Loop");
-        assert_eq!(animation_for(Vec2::Y, 0.6, false, None).0, "Jog_Fwd_Loop");
+        assert_eq!(animation_for(Vec2::Y, 0.6, false, None).0, "Walk_Loop");
         assert_eq!(animation_for(Vec2::Y, 1.0, false, None).0, "Jog_Fwd_Loop");
         let (clip, speed) = animation_for(-Vec2::Y, 0.8, false, None);
         assert_eq!(clip, "Walk_Loop"); assert!(speed < 0.);
@@ -1056,3 +1076,12 @@ mod tests {
 
 
 
+
+#[cfg(test)] mod torso_lean_regression {
+ use super::*;
+ #[test] fn model_facing_rotation_preserves_physical_lean_side() {
+  let model=Quat::from_rotation_y(std::f32::consts::PI);
+  for x in [-0.3_f32,0.3] {let upper=model*torso_lean_rotation(Vec2::new(x,0.),1.,0.)*Vec3::Y;assert!(upper.x*x>0.);}
+  let forward=model*torso_lean_rotation(Vec2::new(0.,0.3),1.,0.)*Vec3::Y;assert!(forward.z<0.);
+ }
+}
