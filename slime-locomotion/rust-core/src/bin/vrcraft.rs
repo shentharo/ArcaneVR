@@ -798,7 +798,7 @@ impl eframe::App for ArcaneVR {
             if let Some(path)=s["recording"].as_str(){ui.label(format!("Recording: {path}"));}
             });
             ui.collapsing("Detection settings",|ui| {
-                ui.label(if s["locomotion"]["algorithm"]=="continuous" {"Continuous motion uses the standing-test acceleration controls above. World-up and acceleration format remain hardware settings."} else {"Alternating mode uses fresh acceleration first (1.2 m/s²), with tilt as a fallback. Alternate left and right steps to drive locomotion."});
+                ui.label(if s["locomotion"]["algorithm"]=="cadence" {"Step rhythm uses foot tilt and acceleration from both feet. Speed follows how fast you step; it adapts to how hard you step."} else if s["locomotion"]["algorithm"]=="continuous" {"Continuous motion uses the standing-test acceleration controls above. World-up and acceleration format remain hardware settings."} else {"Alternating mode uses fresh acceleration first (1.2 m/s²), with tilt as a fallback. Alternate left and right steps to drive locomotion."});
                 ui.checkbox(&mut self.gravity_input,"Legacy acceleration includes gravity (standard SlimeVR: leave off)");
                 ui.horizontal(|ui| {ui.label("World up");ui.selectable_value(&mut self.axis,"y".into(),"Y");ui.selectable_value(&mut self.axis,"z".into(),"Z");ui.add(egui::Slider::new(&mut self.threshold,0.1..=10.).text("Tilt fallback (rad/s)"));});
                 if ui.add_enabled(status.online&&!busy,egui::Button::new("Apply settings and recalibrate")).clicked(){self.send(json!({"command":"stop"}));self.send(json!({"command":"settings","axis":self.axis,"threshold":self.threshold,"acceleration_mode":if self.gravity_input {"gravity-baseline"}else{"linear"}}));}

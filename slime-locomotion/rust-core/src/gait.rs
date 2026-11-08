@@ -1,4 +1,5 @@
 //! Three-IMU locomotion with continuous acceleration and a legacy step mode.
+use crate::cadence::Cadence;
 use crate::continuous::{MotionFilter, Settings, Telemetry};
 pub type Q = [f64; 4]; // internal WXYZ; Slime wire packets are XYZW
 pub const IDENTITY: Q = [1., 0., 0., 0.];
@@ -57,6 +58,8 @@ pub struct Detection {
     pub require_steps: bool,
     pub chest_steps: bool,
     pub continuous: bool,
+    /// Step-rhythm speed from both feet (three-sensor mode). Excludes `continuous`.
+    pub cadence: bool,
     pub motion: Settings,
     pub accel_has_gravity: bool,
     pub threshold: f64,
@@ -72,6 +75,7 @@ impl Default for Detection {
             require_steps: true,
             chest_steps: false,
             continuous: false,
+            cadence: false,
             motion: Settings::default(),
             accel_has_gravity: false,
             threshold: 2.,
@@ -98,6 +102,7 @@ impl Detection {
             || !self.stop_after.is_finite()
             || !(0.16..=1.5).contains(&self.stop_after)
             || ![-1., 1.].contains(&self.sign)
+            || (self.cadence && (self.continuous || self.chest_steps))
         {
             Err("invalid detection settings")
         } else {
@@ -107,6 +112,8 @@ impl Detection {
 }
 pub struct Engine {
     pub motion: MotionFilter,
+    pub cadence: Cadence,
+    pub cadence_state: crate::cadence::CadenceState,
     pub diagnostic_motion: MotionFilter,
     pub diagnostic: Telemetry,
     diagnostic_baseline: Option<[f64;3]>,
@@ -134,7 +141,7 @@ impl Engine {
         motion.set_single_input(cfg.chest_steps);
         let mut diagnostic_motion=MotionFilter::new(cfg.motion.clone()).expect("validated motion settings");diagnostic_motion.set_single_input(true);
         Self {
-            motion, diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
+            motion, cadence: Cadence::default(), cadence_state: Default::default(), diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
             preview: Default::default(),
             sensors: Default::default(),
             cfg,
@@ -195,6 +202,7 @@ impl Engine {
             return Err("Calibrate, then wait for fresh chest and both foot samples");
         }
         self.motion.clear_history();
+        self.cadence.stop();
         self.preview = Default::default();
         self.speed = 0.;
         self.steps.clear();
@@ -221,6 +229,7 @@ impl Engine {
         self.speed = 0.;
         self.steps.clear();
         self.motion.reset();
+        self.cadence.stop();
         self.preview = Default::default();
     }
     pub fn update(&mut self, role: usize, q: Q, t: f64) -> Result<(), &'static str> {
@@ -256,6 +265,9 @@ impl Engine {
         if role == 2 {
             return Ok(());
         }
+        let angular = s.angular;
+        self.cadence.tilt(role, angular, t);
+        let s = &mut self.sensors[role];
         if s.angular < self.cfg.release {
             s.ready = true;
         }
@@ -326,6 +338,9 @@ impl Engine {
             .sum::<f64>()
             .sqrt();
         self.accel_dynamic[role] = dynamic;
+        if !self.cfg.chest_steps {
+            self.cadence.acceleration(role, dynamic, t);
+        }
         self.motion
             .update_foot(role, std::array::from_fn(|i| a[i] - baseline[i]), t)?;
         if dynamic <= 0.45 {
@@ -362,7 +377,14 @@ impl Engine {
                 (self.steps.last().unwrap().0 - self.steps[0].0) / (self.steps.len() - 1) as f64;
             target = ((1. / interval.max(0.16) - 0.8) / 3.2).clamp(0.15, 0.85);
         }
-        if self.cfg.continuous {
+        if self.cfg.cadence {
+            self.preview = self.motion.tick(t);
+            self.cadence_state = self.cadence.tick(t);
+            self.preview.speed = self.cadence_state.speed;
+            self.preview.raw_speed = self.cadence_state.target;
+            self.preview.status = if self.cadence_state.rate > 0. { "walking" } else { "waiting for steps" };
+            self.speed = if active { self.cadence_state.speed } else { 0. };
+        } else if self.cfg.continuous {
             if self.armed && !self.input_ready(t) {
                 self.disarm();
             }
@@ -387,6 +409,66 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Three-sensor step rhythm: feet tilt forward 0.5 rad per step, chest yaw is `yaw`.
+    fn rhythm_frame(e: &mut Engine, t: f64, rate: f64, yaw: f64, feet_yaw: f64) {
+        let period = 2. / rate;
+        for side in 0..2 {
+            let phase = (t - side as f64 * period / 2.).rem_euclid(period);
+            let tilt = if rate > 0. && phase < 0.3 { 0.5 * (phase / 0.3 * std::f64::consts::PI).sin() } else { 0. };
+            // Tilt about X, then yaw about Z (z-up world).
+            let (c, s, cy, sy) = ((tilt / 2.).cos(), (tilt / 2.).sin(), (feet_yaw / 2.).cos(), (feet_yaw / 2.).sin());
+            e.update(side, mul([cy, 0., 0., sy], [c, s, 0., 0.]), t).unwrap();
+            e.update_acceleration(side, [if rate > 0. && (0.27..0.31).contains(&phase) { 3. } else { 0. }, 0., 0.], t).unwrap();
+        }
+        e.update(2, [(yaw / 2.).cos(), 0., 0., (yaw / 2.).sin()], t).unwrap();
+        e.tick(t);
+    }
+    fn rhythm_engine() -> Engine {
+        let mut cfg = Detection::default();
+        cfg.cadence = true;
+        let mut e = Engine::new(cfg);
+        rhythm_frame(&mut e, 0., 0., 0., 0.);
+        e.calibrate(0.).unwrap();
+        rhythm_frame(&mut e, 0.01, 0., 0., 0.);
+        e.arm(0.01).unwrap();
+        e
+    }
+    #[test]
+    fn step_rhythm_walks_with_feet_and_turns_with_chest() {
+        let mut e = rhythm_engine();
+        let mut t = 0.02;
+        let mut speeds = vec![];
+        while t < 5. {
+            rhythm_frame(&mut e, t, 1.8, 0.6, 0.);
+            if t > 2. { speeds.push(e.speed); }
+            t += 0.01;
+        }
+        let mean = speeds.iter().sum::<f64>() / speeds.len() as f64;
+        assert!(mean > 0.3 && speeds.iter().all(|s| *s > 0.2), "walking speed {mean:.3}");
+        assert!((e.heading.abs() - 0.6).abs() < 0.05, "heading {:.3} did not follow chest", e.heading);
+    }
+    #[test]
+    fn step_rhythm_ignores_turning_on_the_spot_and_leaning() {
+        let mut e = rhythm_engine();
+        let mut t = 0.02;
+        while t < 6. {
+            // Feet and chest rotate a full turn without stepping.
+            let yaw = (t / 6.) * std::f64::consts::TAU;
+            rhythm_frame(&mut e, t, 0., yaw, yaw);
+            assert_eq!(e.speed, 0., "moved while turning at {t:.2}");
+            t += 0.01;
+        }
+    }
+    #[test]
+    fn step_rhythm_stops_on_stale_feet() {
+        let mut e = rhythm_engine();
+        let mut t = 0.02;
+        while t < 3. { rhythm_frame(&mut e, t, 2.2, 0., 0.); t += 0.01; }
+        assert!(e.speed > 0.3);
+        e.update(2, IDENTITY, 3.3).unwrap();
+        e.tick(3.3);
+        assert!(!e.armed && e.speed == 0., "stale feet did not stop movement");
+    }
     fn continuous_frame(e: &mut Engine, t: f64, a: [f64; 2]) {
         for i in 0..3 {
             e.update(i, IDENTITY, t).unwrap();

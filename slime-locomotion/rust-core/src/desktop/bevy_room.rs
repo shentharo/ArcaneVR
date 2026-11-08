@@ -57,14 +57,15 @@ impl BevyRoom {
             let f=&state["feet_learning"];let stage=f["stage"].as_str().unwrap_or("");
             ui.label(egui::RichText::new("CALIBRATION").size(14.).strong().color(Color32::from_rgb(97,217,226)));ui.add_space(10.);ui.heading("Learn Feet Sensor");ui.add_space(12.);
             if !self.feet_requested {
-                ui.label("Keep both foot sensors on. Lift left, right, left, right, then walk in place. The recordings are saved for later.");
+                ui.label("Keep all your sensors on, both feet and your chest. Lift your left foot, then right, left, right. Then walk naturally in place for 10 steps (about 10 seconds).");
+                ui.label("This records your own stride so walking can be customised to you. If you use KATVR, walk naturally on your walker. Your recording is saved for later.");
                 if !backend_error.is_empty(){ui.colored_label(Color32::LIGHT_RED,backend_error);}
                 if ui.add_enabled(online,egui::Button::new("Start feet calibration")).clicked(){self.feet_requested=true;return Some(json!({"command":"feet_learn_start"}));}
                 if ui.button("Back").clicked(){self.calibration_mode=1;}return None;
             }
             let side=if f["step"].as_u64().unwrap_or(0)%2==0 {"left"}else{"right"};
             let text=match stage {
-                "waiting"=>"Checking both foot sensors. Keep both switched on.".to_owned(),
+                "waiting"=>"Checking your sensors. Keep your chest and both foot sensors switched on.".to_owned(),
                 "prepare"=>"Preparing the next foot…".to_owned(),
                 "lift"=>format!("Lift your {side} foot.  ({} / 4)",f["step"].as_u64().unwrap_or(0)+1),
                 "lower"=>format!("Movement found. Lower your {side} foot."),
@@ -78,7 +79,7 @@ impl BevyRoom {
             ui.label(egui::RichText::new(text).size(23.).strong());
             if stage=="ready" || stage=="walk" {
                 ui.add_space(10.);
-                ui.label("We’re recording your natural walking style to help customise movement later. Walk as you want to walk in the game. If you use KATVR, walk on your walker.");
+                ui.label("We’re recording your natural stride so walking can be customised to you. Walk the way you want to walk in the game. If you use KATVR, walk naturally on your walker.");
             }
             if stage=="ready"{let elapsed=f["elapsed"].as_f64().unwrap_or(0.);ui.label(egui::RichText::new(format!("Starting in {}",(3.-elapsed).ceil().max(1.) as u32)).size(20.));}
             if stage=="walk"{ui.add(egui::ProgressBar::new((state["feet_learning"]["elapsed"].as_f64().unwrap_or(0.)/10.) as f32).show_percentage());}

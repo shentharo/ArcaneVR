@@ -11,11 +11,35 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
 };
+
+/// Saved with the locomotion settings. Revision 2 introduced step-rhythm walking; older
+/// three-sensor configurations are moved to it once when loaded.
+const LOCOMOTION_REVISION: u64 = 2;
+fn algorithm_name(cfg: &Detection) -> &'static str {
+    if cfg.cadence { "cadence" } else if cfg.continuous { "continuous" } else { "alternating" }
+}
+fn set_algorithm(cfg: &mut Detection, name: Option<&str>) -> Result<(), String> {
+    (cfg.continuous, cfg.cadence) = match name {
+        None | Some("continuous") => (true, false),
+        Some("alternating") => (false, false),
+        Some("cadence") => (false, true),
+        _ => return Err("Unknown locomotion algorithm".into()),
+    };
+    Ok(())
+}
+fn migrate_algorithm(cfg: &mut Detection, locomotion: &Value, movement_engine: &str) {
+    let revision = locomotion["revision"].as_u64().unwrap_or(1);
+    if revision < LOCOMOTION_REVISION && movement_engine == "chest_heading_steps" && cfg.require_steps && !cfg.chest_steps {
+        cfg.continuous = false;
+        cfg.cadence = true;
+    }
+}
 pub const ROLES: [&str; 3] = ["left", "right", "torso"];
 mod calibration_session;
 mod jump_learning;
 mod walking_learning;
 mod feet_learning;
+mod step_count;
 mod crouch_learning;
 #[derive(Clone)]
 pub struct Record {
@@ -159,11 +183,8 @@ impl Lab {
         } else {
             crate::gestures::Settings::default()
         };
-        cfg.continuous = match v["locomotion"]["algorithm"].as_str() {
-            None | Some("continuous") => true,
-            Some("alternating") => false,
-            _ => return Err("Unknown locomotion algorithm".into()),
-        };
+        set_algorithm(&mut cfg, v["locomotion"]["algorithm"].as_str())?;
+        migrate_algorithm(&mut cfg, &v["locomotion"], &movement_engine);
         if let Some(settings) = v["locomotion"].get("settings") {
             cfg.motion =
                 crate::continuous::Settings::from_json(settings).map_err(|e| e.to_string())?;
@@ -334,7 +355,7 @@ impl Lab {
         self.save_options_count(mapping,cfg,output_mode,actions,gestures,movement_engine,if movement_engine=="body_tilt" || cfg.chest_steps {1}else{self.sensor_count.max(3)})
     }
     fn save_options_count(&self,mapping:&[String;3],cfg:&Detection,output_mode:&str,actions:&crate::actions::Settings,gestures:&crate::gestures::Settings,movement_engine:&str,sensor_count:u8)->Result<(),String> {
-        let v = json!({"walking_model":self.walking_model,"auto_add":self.auto_add,"tracker_identities":self.tracker_identities,"mounting_calibration":{"learned_identity":self.learned_mounting_identity,"devices":self.device_mountings},"sensor_layout":{"count":sensor_count,"thighs":self.thighs},"actions":actions.to_json(),"gestures":gestures.to_json(),"movement_engine":movement_engine,"step_input":if cfg.chest_steps {"chest"} else if movement_engine=="body_tilt" {"off"} else {"feet"},"locomotion":{"algorithm":if cfg.continuous {"continuous"} else {"alternating"},"settings":cfg.motion.to_json()},"output_mode":output_mode,"trackers":{"left":mapping[0],"right":mapping[1],"torso":mapping[2]},"detection":{"acceleration_mode":if cfg.accel_has_gravity {"gravity-baseline"} else {"linear"},"threshold":cfg.threshold,"release":cfg.release,"stale":cfg.stale,"stop_after":cfg.stop_after,"heading_axis":if cfg.y_up{"y"}else{"z"},"heading_sign":cfg.sign}});
+        let v = json!({"walking_model":self.walking_model,"auto_add":self.auto_add,"tracker_identities":self.tracker_identities,"mounting_calibration":{"learned_identity":self.learned_mounting_identity,"devices":self.device_mountings},"sensor_layout":{"count":sensor_count,"thighs":self.thighs},"actions":actions.to_json(),"gestures":gestures.to_json(),"movement_engine":movement_engine,"step_input":if cfg.chest_steps {"chest"} else if movement_engine=="body_tilt" {"off"} else {"feet"},"locomotion":{"algorithm":algorithm_name(cfg),"revision":LOCOMOTION_REVISION,"settings":cfg.motion.to_json()},"output_mode":output_mode,"trackers":{"left":mapping[0],"right":mapping[1],"torso":mapping[2]},"detection":{"acceleration_mode":if cfg.accel_has_gravity {"gravity-baseline"} else {"linear"},"threshold":cfg.threshold,"release":cfg.release,"stale":cfg.stale,"stop_after":cfg.stop_after,"heading_axis":if cfg.y_up{"y"}else{"z"},"heading_sign":cfg.sign}});
         if let Some(parent) = self.config.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -497,7 +518,7 @@ impl Lab {
         }
     }
     fn current_profile(&self) -> Value {
-        json!({"locomotion":{"algorithm":if self.engine.cfg.continuous {"continuous"} else {"alternating"},"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
+        json!({"locomotion":{"algorithm":algorithm_name(&self.engine.cfg),"revision":LOCOMOTION_REVISION,"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
     }
     fn gesture_input(&self, t: f64) -> crate::gestures::Input {
         let source = |i: usize| {
@@ -534,11 +555,8 @@ impl Lab {
     fn load_profile_settings_inner(&mut self, v: &Value, preserve_chest:bool) -> Result<(), String> {
         let mut cfg = self.engine.cfg.clone();
         if let Some(l) = v.get("locomotion") {
-            cfg.continuous = match l["algorithm"].as_str() {
-                Some("continuous") => true,
-                Some("alternating") => false,
-                _ => return Err("Invalid profile algorithm".into()),
-            };
+            if l["algorithm"].is_null() {return Err("Invalid profile algorithm".into());}
+            set_algorithm(&mut cfg, l["algorithm"].as_str()).map_err(|_| "Invalid profile algorithm".to_string())?;
             cfg.motion =
                 crate::continuous::Settings::from_json(&l["settings"]).map_err(str::to_owned)?;
         }
@@ -561,6 +579,7 @@ impl Lab {
         if cfg.chest_steps && !cfg.continuous {return Err("Chest step input requires continuous motion".into());}
         if (mode=="body_tilt" || cfg.chest_steps) != (count==1) {return Err("Sensor count and movement engine do not match".into());}
         cfg.require_steps = mode != "body_tilt" && !cfg.chest_steps;
+        if let Some(l) = v.get("locomotion") { migrate_algorithm(&mut cfg, l, mode); }
         if let Some(d) = v.get("detection") {
             if let Some(x) = d.get("threshold") {
                 cfg.threshold = x.as_f64().ok_or("Invalid threshold")?;
@@ -650,7 +669,7 @@ impl Lab {
                 if self.demo {return Err("Feet calibration needs live sensors".into());}
                 if self.mapping[0].is_empty() || self.mapping[1].is_empty() {return Err("Assign both foot sensors first".into());}
                 self.engine.disarm();self.walking=false;self.new_generation();
-                self.feet_learning=Some(feet_learning::Session::new([self.mapping[0].clone(),self.mapping[1].clone()]));self.feet_learning_result=Value::Null;
+                self.feet_learning=Some(feet_learning::Session::new([self.mapping[0].clone(),self.mapping[1].clone()],self.mapping[2].clone()));self.feet_learning_result=Value::Null;
             },
             "feet_learn_cancel" => {self.feet_learning=None;self.feet_learning_result=json!({"active":false,"stage":"canceled","message":"Feet calibration canceled. No recording saved."});},
             "feet_learn_confirm" => {
@@ -931,7 +950,7 @@ impl Lab {
             "step_input" => {
                 let source=v["source"].as_str().ok_or("Missing step input source")?;
                 let (mode,chest)=match source {"off"=>("body_tilt",false),"chest"=>("body_tilt_steps",true),"feet"=>("body_tilt_steps",false),_=>return Err("Choose off, chest or feet".into())};
-                let mut cfg=self.engine.cfg.clone();cfg.chest_steps=chest;cfg.require_steps=source=="feet";if chest {cfg.continuous=true;}
+                let mut cfg=self.engine.cfg.clone();cfg.chest_steps=chest;cfg.require_steps=source=="feet";if chest {cfg.continuous=true;cfg.cadence=false;}
                 let mut actions=self.actions.settings().clone();actions.direction.enabled=true;
                 let count=if source=="feet" {3} else {1};
                 self.save_options_count(&self.mapping,&cfg,&self.output_mode,&actions,self.gestures.settings(),mode,count)?;
@@ -1092,7 +1111,7 @@ impl Lab {
                     crate::actions::Settings::from_json(a).map_err(str::to_owned)?;
                 }
                 if let Some(l) = profile_settings.get("locomotion") {
-                    if ![Some("continuous"), Some("alternating")].contains(&l["algorithm"].as_str())
+                    if ![Some("continuous"), Some("alternating"), Some("cadence")].contains(&l["algorithm"].as_str())
                     {
                         return Err("Invalid profile algorithm".into());
                     }
@@ -1164,10 +1183,11 @@ impl Lab {
             }
             "locomotion_settings" => {
                 let mut cfg = self.engine.cfg.clone();
-                cfg.continuous = match v["algorithm"].as_str() {
-                    Some("continuous") => true,
-                    Some("alternating") if !cfg.chest_steps => false,
-                    _ => return Err("Choose continuous or alternating locomotion".into()),
+                (cfg.continuous, cfg.cadence) = match v["algorithm"].as_str() {
+                    Some("continuous") => (true, false),
+                    Some("alternating") if !cfg.chest_steps => (false, false),
+                    Some("cadence") if !cfg.chest_steps && cfg.require_steps => (false, true),
+                    _ => return Err("Choose step rhythm, continuous or alternating locomotion".into()),
                 };
                 cfg.motion = crate::continuous::Settings::from_json(&v["settings"])
                     .map_err(|e| e.to_string())?;
@@ -1905,7 +1925,7 @@ impl Lab {
             .collect();
         trackers.sort_by_key(|v| v["id"].as_str().unwrap().to_string());
         let preview = &self.engine.preview;
-        let locomotion = json!({"algorithm":if self.engine.cfg.continuous {"continuous"} else {"alternating"},
+        let locomotion = json!({"algorithm":algorithm_name(&self.engine.cfg),"cadence":{"speed":self.engine.cadence_state.speed,"rate":self.engine.cadence_state.rate,"steps":self.engine.cadence_state.steps},
             "settings":self.engine.cfg.motion.to_json(), "input_ready":self.engine.input_ready(t)&&self.thighs_ready(t),
             "diagnostic":{"source":"chest","status":self.engine.diagnostic.status,"speed":self.engine.diagnostic.speed,"raw_speed":self.engine.diagnostic.raw_speed,"signal":self.engine.diagnostic.signal,"fast":self.engine.diagnostic.fast,"slow":self.engine.diagnostic.slow,"adaptive":self.engine.diagnostic.adaptive,"inertia":self.engine.diagnostic.inertia,"sprint":self.engine.diagnostic.sprint},
             "preview":{"raw_speed":preview.raw_speed,"speed":preview.speed,"sprint":preview.sprint,"signal":preview.signal,"fast":preview.fast,"slow":preview.slow,
@@ -2375,7 +2395,8 @@ mod tests {
             "sensor-right".into(),
             "sensor-chest".into(),
         ];
-        assert!(l.engine.cfg.continuous);
+        l.engine.cfg.cadence = false;
+        l.engine.cfg.continuous = true;
         let generation = l.generation;
         l.command(&json!({"command":"locomotion_settings","algorithm":"continuous","settings":{"intensity":2.,"fast_stop":false}}),0.).unwrap();
         assert_ne!(l.generation, generation);
@@ -2394,6 +2415,8 @@ mod tests {
     #[test]
     fn continuous_demo_preview_and_output_have_separate_gates() {
         let mut l = Lab::new(PathBuf::from("nonexistent-continuous-fixture.json")).unwrap();
+        l.engine.cfg.cadence = false;
+        l.engine.cfg.continuous = true;
         l.command(&json!({"command":"mode","mode":"demo"}), 0.)
             .unwrap();
         l.command(&json!({"command":"demo","walk":true,"yaw":45}), 0.)
@@ -2428,7 +2451,42 @@ mod tests {
     fn legacy_lab(path: PathBuf) -> Result<Lab, String> {
         let mut lab = Lab::new(path)?;
         lab.engine.cfg.continuous = false;
+        lab.engine.cfg.cadence = false;
         Ok(lab)
+    }
+    fn temp_config(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{name}-{}-{}.json", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+    }
+    #[test]
+    fn new_three_sensor_setup_uses_step_rhythm() {
+        let l = Lab::new(temp_config("cadence-default")).unwrap();
+        assert!(l.engine.cfg.cadence && !l.engine.cfg.continuous);
+    }
+    #[test]
+    fn older_three_sensor_config_moves_to_step_rhythm_once_and_keeps_a_later_choice() {
+        let path = temp_config("cadence-migrate");
+        fs::write(&path, serde_json::to_vec(&json!({"locomotion":{"algorithm":"continuous","settings":{}}})).unwrap()).unwrap();
+        let mut l = Lab::new(path.clone()).unwrap();
+        assert!(l.engine.cfg.cadence, "1.1.7 config was not moved to step rhythm");
+        l.mapping = ["l".into(), "r".into(), "c".into()];
+        l.command(&json!({"command":"locomotion_settings","algorithm":"continuous","settings":{}}), 0.).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["locomotion"]["algorithm"], "continuous");
+        assert_eq!(saved["locomotion"]["revision"], LOCOMOTION_REVISION);
+        let restored = Lab::new(path.clone()).unwrap();
+        assert!(restored.engine.cfg.continuous && !restored.engine.cfg.cadence, "user's choice was overridden");
+        l.command(&json!({"command":"locomotion_settings","algorithm":"cadence","settings":{}}), 1.).unwrap();
+        assert!(Lab::new(path.clone()).unwrap().engine.cfg.cadence);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn single_sensor_configs_are_not_moved_to_step_rhythm() {
+        let path = temp_config("cadence-tilt");
+        fs::write(&path, serde_json::to_vec(&json!({"movement_engine":"body_tilt","locomotion":{"algorithm":"continuous","settings":{}}})).unwrap()).unwrap();
+        let l = Lab::new(path.clone()).unwrap();
+        assert!(!l.engine.cfg.cadence && l.engine.cfg.continuous);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

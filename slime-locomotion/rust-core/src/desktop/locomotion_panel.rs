@@ -147,7 +147,8 @@ impl LocomotionPanel {
         ui.columns(column_count,|columns|{
             let ui=&mut columns[0];
             pages::card(ui,"Locomotion Setup",|ui|{
-                ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.algorithm,"continuous".into(),"Continuous motion").changed().then(||self.dirty=true);if source == "feet" { self.dirty |= ui.selectable_value(&mut self.algorithm,"alternating".into(),"Alternating steps").changed(); }});
+                ui.horizontal_wrapped(|ui|{if source == "feet" { self.dirty |= ui.selectable_value(&mut self.algorithm,"cadence".into(),"Step rhythm (recommended)").changed(); }ui.selectable_value(&mut self.algorithm,"continuous".into(),"Continuous motion").changed().then(||self.dirty=true);if source == "feet" { self.dirty |= ui.selectable_value(&mut self.algorithm,"alternating".into(),"Alternating steps").changed(); }});
+                if self.algorithm=="cadence" {ui.small("Speed follows the rhythm of your steps: walk slowly to move slowly, step faster to run. It learns how hard you step as you walk, and stops shortly after your last step. The sliders below are for Continuous motion only.");}
                 ui.add_space(6.);ui.horizontal(|ui|{for name in ["Gentle","Balanced","Responsive"]{if ui.button(name).clicked(){self.preset(name);}}});
                 ui.add_space(10.);
                 ui.label(RichText::new("Step Input Source").strong());ui.label(if source!="feet" {"Assigned chest SlimeVR sensor"} else {"Assigned left and right SlimeVR sensors"});
@@ -224,7 +225,7 @@ impl LocomotionPanel {
         let mut command=None;
         pages::card(ui,"Live Acceleration",|ui| {
             if source=="off" {ui.colored_label(AMBER,"Chest diagnostic only: step input is off. Enable chest steps in Setup to use these settings.");}
-            else if self.algorithm!="continuous" {ui.colored_label(AMBER,"Continuous thresholds do not control the alternating-step algorithm. Select Continuous motion in Steps to use them.");}
+            else if self.algorithm!="continuous" {ui.colored_label(AMBER,"Continuous thresholds do not control step rhythm or alternating steps. Select Continuous motion in Steps to use them.");}
             else {ui.small("Drag the handles to adjust step signal thresholds. Apply & stop saves the draft.");}
             let height=260.;let width=ui.available_width().max(1.);
             let (rect,_)=ui.allocate_exact_size(egui::vec2(width,height),egui::Sense::hover());

@@ -18,6 +18,7 @@ pub fn build(current: &Value, choices: &Value) -> Result<Value,String> {
     out["sensor_layout"]=json!({"count":if !steps || source=="chest" {1}else if thighs {5}else{3}});
     out["step_input"]=json!(source);
     if source=="chest" {out["locomotion"]["algorithm"]=json!("continuous");}
+    else if steps && source=="feet" && !lean && !sprint {out["locomotion"]["algorithm"]=json!("cadence");}
     out["movement_engine"]=json!(if lean&&steps {"body_tilt_steps"} else if lean {"body_tilt"}else{"chest_heading_steps"});
     out["actions"]["direction"]["enabled"]=json!(lean);out["actions"]["direction"]["forward_only"]=json!(!backward);out["actions"]["direction"]["strafe_enabled"]=json!(strafe);out["actions"]["direction"]["max_output"]=json!(max);out["actions"]["direction"]["decouple"]=json!(false);
     if let Some(value)=obj.get("sprint_full_forward") {out["actions"]["direction"]["sprint_full_forward"]=json!(value.as_bool().ok_or("sprint_full_forward must be boolean")?);}

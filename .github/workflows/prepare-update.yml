@@ -33,8 +33,23 @@ jobs:
         run: cargo test --release --manifest-path slime-locomotion/rust-core/Cargo.toml --lib --bins
       - name: Test update installer
         run: python slime-locomotion/rust-core/tests/test_update_install.py
+      - name: Build Test Room renderer
+        working-directory: slime-locomotion/bevy-test-room
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo build --release --locked
       - name: Build
-        run: cargo build --release --manifest-path slime-locomotion/rust-core/Cargo.toml --bin vrcraft
+        shell: pwsh
+        run: |
+          $renderer = Resolve-Path slime-locomotion/bevy-test-room/target/release/arcane-test-room.exe
+          $env:ARCANEVR_EMBED_RENDERER = $renderer.Path
+          cargo build --release --manifest-path slime-locomotion/rust-core/Cargo.toml --bin vrcraft
+          if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
+          $app = (Get-Item slime-locomotion/rust-core/target/release/vrcraft.exe).Length
+          $viewer = (Get-Item $renderer).Length
+          if ($app -le $viewer) { throw 'The Test Room renderer was not embedded in the application.' }
+          Write-Host "Embedded renderer ($viewer bytes) in application ($app bytes)."
+          Get-FileHash slime-locomotion/rust-core/target/release/vrcraft.exe -Algorithm SHA256
       - name: Create draft release
         shell: pwsh
         env:

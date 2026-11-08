@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub mod actions;
 pub mod calibration;
 pub mod continuous;
+pub mod cadence;
 pub mod gait;
 pub mod gestures;
 pub mod lab;
