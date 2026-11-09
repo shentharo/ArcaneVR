@@ -1,4 +1,4 @@
-"""CLI QA of the actual ArcaneVR receiver and app-owned update dialog capture."""
+"""CLI QA of the actual ArcaneVR receiver and app-owned inline update capture."""
 from pathlib import Path
 import argparse
 import hashlib

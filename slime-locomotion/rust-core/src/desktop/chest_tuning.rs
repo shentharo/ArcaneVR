@@ -244,7 +244,7 @@ impl ChestTuning {
      self.dirty|=slider(ui,d,"backward_deadzone_multiplier","Backward deadzone factor",1.0..=backward_limit.clamp(1.,3.),1.);
      let mut inverted=number(&d["pitch_sign"])<0.; if ui.checkbox(&mut inverted,"Invert forward / backward").changed(){d["pitch_sign"]=json!(if inverted {-1.}else{1.});self.dirty=true;}
      let mut inverted=number(&d["roll_sign"])<0.; if ui.checkbox(&mut inverted,"Invert left / right").changed(){d["roll_sign"]=json!(if inverted {-1.}else{1.});self.dirty=true;}
-     self.dirty|=check(ui,d,"strafe_enabled","Enable strafing");self.dirty|=check(ui,d,"sprint_full_forward","Sprint past sprint ring");
+     self.dirty|=check(ui,d,"strafe_enabled","Enable leaning to strafe");self.dirty|=check(ui,d,"sprint_full_forward","Sprint past sprint ring");
      if ui.button("Linear 25° baseline").clicked(){baseline(d);self.dirty=true;}
      ui.small("Draft: 5% deadzone, linear response, 25° maximum. Apply to save; mounting stays unchanged.");
      });

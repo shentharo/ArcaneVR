@@ -405,12 +405,43 @@ impl Lab {
     fn mounting_valid(&self, t: f64) -> bool {
         self.demo || self.current_mounting_identity(t).is_some_and(|id| self.learned_mounting_identity.as_deref() == Some(id.as_str()))
     }
+    fn heading_strafe_enabled(&self) -> bool {
+        self.movement_engine == "chest_heading_steps" && self.actions.settings().direction.heading_strafe_enabled
+    }
+    fn process_action_preview(&mut self, input: &crate::actions::Input) -> crate::actions::Telemetry {
+        if self.heading_strafe_enabled() {
+            self.actions.process_heading_strafe(input)
+        } else if !self.engine.armed && (!crate::actions::ActionProcessor::has_fresh_head(input) || !self.actions.settings().direction.enabled) {
+            self.actions.process_chest_preview(input)
+        } else {
+            self.actions.process(input)
+        }
+    }
+    fn compose_travel(&self, t: f64, speed: f64) -> [f64; 2] {
+        let scale = speed * self.action_preview.speed_multiplier;
+        if self.movement_engine != "chest_heading_steps" {
+            return if self.action_preview.direction_status == "ready" { self.action_preview.travel_xy.map(|v| v * scale) } else { [0.; 2] };
+        }
+        let cap = scale * self.actions.settings().direction.max_output;
+        let mut travel = [0., cap];
+        if self.heading_strafe_enabled() {
+            // Feet own all translation speed. A cached speed must not survive
+            // expired feet between receiver ticks and packet emission.
+            if self.engine.cfg.require_steps && !self.engine.cfg.chest_steps && self.engine.sensors[..2].iter().any(|s| t < s.seen || t - s.seen >= self.engine.cfg.stale) { return [0.; 2]; }
+            if self.action_preview.direction_status == "ready" && self.mounting_valid(t) {
+                travel[0] = self.action_preview.travel_xy[0] * scale;
+            }
+            let length = travel[0].hypot(travel[1]);
+            if length > cap && length > 0. { travel = travel.map(|v| v * cap / length); }
+        }
+        travel
+    }
     fn gate_mounting_preview(&mut self, t: f64) {
         if let Some(session) = &self.sensor_calibration {
             self.action_preview = session.preview;
             return;
         }
-        if self.movement_engine != "chest_heading_steps" && !self.mounting_valid(t) {
+        if (self.movement_engine != "chest_heading_steps" || self.heading_strafe_enabled()) && !self.mounting_valid(t) {
             self.action_preview.travel_xy = [0.; 2];
             self.action_preview.raw_direction_angles = None;self.action_preview.chest_yaw = None;
             self.action_preview.direction_status = "Sensor calibration required for this chest tracker";
@@ -763,6 +794,7 @@ impl Lab {
                 if !self.thighs_ready(t){return Err("Waiting for both thigh trackers".into());}
                 let a = self.actions.settings();
                 let advanced = self.movement_engine != "chest_heading_steps"
+                    || a.direction.heading_strafe_enabled
                     || a.direction.enabled
                     || a.jump.enabled
                     || a.crouch.enabled
@@ -1584,11 +1616,7 @@ impl Lab {
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
-        self.action_preview = if !self.engine.armed && (!crate::actions::ActionProcessor::has_fresh_head(&input) || !self.actions.settings().direction.enabled) {
-            self.actions.process_chest_preview(&input)
-        } else {
-            self.actions.process(&input)
-        };
+        self.action_preview = self.process_action_preview(&input);
         self.gate_mounting_preview(t);
         self.walking_speed=0.;self.walking_effort=0.;
         let identity=self.current_mounting_identity(t);
@@ -1612,15 +1640,7 @@ impl Lab {
         } else {
             if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{if self.engine.armed {self.engine.speed}else{self.engine.preview.speed}}
         };
-        self.travel_xy = if !direction_ready {
-            [0.; 2]
-        } else if is_tilt {
-            self.action_preview
-                .travel_xy
-                .map(|x| x * speed * self.action_preview.speed_multiplier)
-        } else {
-            [0., speed * self.action_preview.speed_multiplier * self.actions.settings().direction.max_output]
-        };
+        self.travel_xy = self.compose_travel(t, speed);
         if self.engine.cfg.chest_steps && self.walking_model.is_object() {
 
             if self.walking_learning.is_some(){self.travel_xy=[0.;2];}
@@ -1787,11 +1807,7 @@ impl Lab {
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
-        self.action_preview = if !self.engine.armed && (!crate::actions::ActionProcessor::has_fresh_head(&input) || !self.actions.settings().direction.enabled) {
-            self.actions.process_chest_preview(&input)
-        } else {
-            self.actions.process(&input)
-        };
+        self.action_preview = self.process_action_preview(&input);
         self.gate_mounting_preview(t);
         self.gesture_preview = Default::default();
         let is_tilt = self.movement_engine != "chest_heading_steps";
@@ -1800,15 +1816,7 @@ impl Lab {
         } else {
             if self.engine.cfg.chest_steps && self.walking_model.is_object() {self.walking_speed}else{if self.engine.armed {self.engine.speed}else{self.engine.preview.speed}}
         };
-        self.travel_xy = if is_tilt && self.action_preview.direction_status != "ready" {
-            [0.; 2]
-        } else if is_tilt {
-            self.action_preview
-                .travel_xy
-                .map(|x| x * scale * self.action_preview.speed_multiplier)
-        } else {
-            [0., scale * self.action_preview.speed_multiplier * self.actions.settings().direction.max_output]
-        };
+        self.travel_xy = self.compose_travel(t, scale);
         if self.engine.cfg.chest_steps && self.walking_model.is_object() {
             if let Some([x,y])=self.action_preview.raw_direction_angles.filter(|a|a[1].abs()>0.05) {
                 // Remove the learned lateral gait component before head-relative rotation.
@@ -2522,6 +2530,79 @@ mod tests {
     fn temp_config(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("{name}-{}-{}.json", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+    }
+    fn heading_strafe_fixture() -> Lab {
+        let mut l=Lab::new(temp_config("heading-strafe-unit")).unwrap();
+        l.movement_engine="chest_heading_steps".into();
+        l.engine.cfg.require_steps=true; l.engine.cfg.chest_steps=false;l.engine.cfg.y_up=false;
+        l.engine.cfg.cadence=false; l.engine.cfg.continuous=false;
+        l.mapping=["10.0.0.1:0".into(),"10.0.0.2:0".into(),"10.0.0.3:0".into()];
+        l.peer_macs.insert("10.0.0.3".into(),"02:00:00:00:00:03".into());
+        l.learned_mounting_identity=Some("02:00:00:00:00:03:0".into());
+        let mut settings=crate::actions::Settings::default();
+        settings.direction.heading_strafe_enabled=true;
+        settings.direction.enabled=false;settings.direction.strafe_enabled=false;settings.direction.decouple=true;
+        settings.direction.learned_forward=Some([1.,0.,0.]);settings.direction.learned_right=Some([0.,1.,0.]);
+        settings.direction.max_output=0.6;
+        l.actions=crate::actions::ActionProcessor::new(settings).unwrap();
+        for i in 0..3 {
+            l.engine.update(i,crate::gait::IDENTITY,1.).unwrap();
+            l.records.insert(l.mapping[i].clone(),Record{q:crate::gait::IDENTITY,seen:1.,angular:0.,has_interval:true});
+        }
+        l.engine.calibrate(1.).unwrap();
+        l.actions.set_world_up([0.,0.,1.]);
+        let input=l.action_input(1.);l.actions.calibrate_chest_preview(&input).unwrap();
+        l
+    }
+    #[test]
+    fn heading_strafe_composition_caps_and_gates_only_lateral() {
+        let mut l=heading_strafe_fixture();
+        l.action_preview.direction_status="ready";
+        l.action_preview.travel_xy=[0.6,-0.6]; // Forward lean must never become feet-forward.
+        l.action_preview.speed_multiplier=0.5;
+        let travel=l.compose_travel(1.,0.8);
+        assert!(travel[0]>0. && travel[1]>0.);
+        assert!((travel[0].hypot(travel[1])-0.24).abs()<1e-10);
+        l.action_preview.direction_status="missing chest";
+        assert_eq!(l.compose_travel(1.,0.8),[0.,0.24]);
+        l.action_preview.direction_status="ready";l.learned_mounting_identity=None;
+        assert_eq!(l.compose_travel(1.,0.8),[0.,0.24]);
+        // An active calibration preview cannot bypass the independent mounting gate.
+        assert_eq!(l.compose_travel(1.,0.),[0.;2]);
+        l.engine.sensors[0].seen=0.;assert_eq!(l.compose_travel(1.,0.8),[0.;2]);
+        l.engine.sensors[0].seen=1.;
+        let mut settings=l.actions.settings().clone();settings.direction.heading_strafe_enabled=false;
+        l.actions=crate::actions::ActionProcessor::new(settings).unwrap();
+        assert_eq!(l.compose_travel(1.,0.8),[0.,0.24]);
+        l.movement_engine="body_tilt".into();
+        assert_eq!(l.compose_travel(1.,0.8),[0.24,-0.24]);
+    }
+    #[test]
+    fn heading_strafe_tick_and_real_packet_share_composition() {
+        let mut l=heading_strafe_fixture();
+        let q=[0.25f64.cos(),0.,0.25f64.sin(),0.];
+        for i in 0..3 {
+            let pose=if i==2 {q}else{crate::gait::IDENTITY};
+            l.engine.update(i,pose,1.1).unwrap();
+            l.records.insert(l.mapping[i].clone(),Record{q:pose,seen:1.1,angular:0.,has_interval:true});
+        }
+        l.engine.armed=true;l.engine.steps=vec![(0.8,0),(1.05,1)];
+        l.tick(1.1,0.);
+        let preview=l.travel_xy;
+        assert!(preview[0]>0. && preview[1]>0.);
+        l.output_mode="steamvr".into();l.protocol_v2=true;
+        l.ack_seen=1.1;l.ack_flags=7;l.was_driver_ready=true;
+        l.neutral_pending=false;l.steam_retry_since=Some(1.1);
+        let packet=l.steam_packet(1.1);
+        assert_eq!(l.travel_xy,preview);
+        for i in 0..2 {
+            assert_eq!(f32::from_le_bytes(packet[12+i*4..16+i*4].try_into().unwrap()),preview[i] as f32);
+        }
+        assert_eq!(u32::from_le_bytes(packet[32..36].try_into().unwrap()),0,"heading output must retain global-forward flags");
+        l.engine.sensors[0].seen=0.;
+        let packet=l.steam_packet(1.1);
+        assert_eq!(l.travel_xy,[0.;2]);
+        assert!(packet[12..20].iter().all(|b|*b==0));
     }
     #[test]
     fn new_three_sensor_setup_uses_step_rhythm() {

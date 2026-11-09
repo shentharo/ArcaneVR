@@ -11,7 +11,7 @@ import threading
 import time
 import urllib.request
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(os.environ.get('ARCANEVR_QA_ROOT', str(Path(__file__).resolve().parents[3])))
 OUT = ROOT / 'release/lean-output-contract' / time.strftime('qa-%H%M%S')
 OUT.mkdir(parents=True,exist_ok=True)
 cfg = json.loads((ROOT / 'tracker-group.json').read_text())
@@ -23,6 +23,7 @@ cfg['step_input'] = 'off'
 cfg['movement_engine'] = 'body_tilt'
 cfg['actions']['direction']['smoothing_ms'] = 0
 cfg['actions']['direction']['decouple'] = True
+cfg['actions']['direction']['strafe_enabled'] = True
 # Known test mounting: physical direction assignments never come from user's live flips.
 cfg['actions']['direction']['pitch_sign'] = -1.
 cfg['actions']['direction']['roll_sign'] = -1.
@@ -34,7 +35,8 @@ env = os.environ.copy()
 env.update(ARCANEVR_EMBED_QA='1',
            ARCANEVR_EMBED_QA_REPORT=str(OUT / 'embed.json'),
            ARCANEVR_VIEWER_QA_SCREENSHOT=str(OUT / 'renderer.png'),
-           ARCANEVR_VIEWER_QA_REPORT=str(OUT / 'renderer.json'))
+           ARCANEVR_VIEWER_QA_REPORT=str(OUT / 'renderer.json'),
+           ARCANEVR_VIEWER_QA_SERIES=str(OUT / 'series.jsonl'))
 base = 'http://127.0.0.1:18825/api/'
 
 def state():
@@ -111,6 +113,32 @@ with (OUT / 'isolated-app.log').open('w') as log:
             final=v['game_output_preview']['travel_xy']
             assert max(abs(a-b) for a,b in zip(final,xy))<1e-6,(final,xy)
             checks.append({'direction':name,'travel_xy':xy})
+        # The Test checkbox sends this exact settings command. Toggle only the
+        # existing gate, retaining the learned mounting, center and forward input.
+        baseline=state()
+        settings=baseline['actions']['settings']
+        settings['direction']['strafe_enabled']=False
+        command({'command':'actions_settings','settings':settings})
+        for name,q,axis,sign in [('right-disabled',[c,0.,s,0.],0,0),
+                               ('left-disabled',[c,0.,-s,0.],0,0),
+                               ('forward-still-enabled',[c,-s,0.,0.],1,1)]:
+            pose=q;time.sleep(.5);v=state()
+            xy=v['game_output_preview']['travel_xy']
+            assert (abs(xy[axis])<.001 if sign==0 else xy[axis]*sign>.1),(name,xy)
+            assert v['actions']['preview']['calibrated'],name
+            assert not v['armed']
+            checks.append({'direction':name,'travel_xy':xy})
+        saved=json.loads(config.read_text())
+        assert saved['actions']['direction']['strafe_enabled'] is False
+        assert saved['trackers']==cfg['trackers']
+        assert v['actions']['settings']['direction']['learned_forward']==baseline['actions']['settings']['direction']['learned_forward']
+        assert v['actions']['settings']['direction']['learned_right']==baseline['actions']['settings']['direction']['learned_right']
+        settings['direction']['strafe_enabled']=True
+        command({'command':'actions_settings','settings':settings})
+        pose=[c,0.,s,0.];time.sleep(.5);v=state()
+        assert v['game_output_preview']['travel_xy'][0]>.1
+        assert json.loads(config.read_text())['actions']['direction']['strafe_enabled'] is True
+        checks.append({'strafe_toggle':'off suppresses left/right, preserves forward and center; on restores right; persisted without assignment changes'})
         settings=state()['actions']['settings']
         d=settings['direction']
         d.update(deadzone=0.1,forward_deadzone=0.1,backward_deadzone=0.1,left_deadzone=0.1,right_deadzone=0.1,max_angle=0.4,horizontal_max_angle=0.4,forward_max_angle=0.4,forward_offset=0.,exponent=1.,max_output=1.,smoothing_ms=0.,sprint_full_forward=True,sprint_angle=0.6)

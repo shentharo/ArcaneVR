@@ -21,13 +21,14 @@ impl ProfileBuilder{
     ui.columns(3,|cols|{
      cols[0].label(RichText::new("MOVEMENT").color(Color32::from_rgb(87,219,218)).strong());
      if cols[0].checkbox(&mut d.lean,"Lean to move").on_hover_text("Enable lean steering and full-forward lean sprint. Turning it off also turns off chest-wobble walking, which uses lean for direction.").changed(){self.dirty=true;d.set_lean(d.lean);}
-     if cols[0].checkbox(&mut d.steps,"Walk in place").on_hover_text("Forward movement and sprint require learned chest wobble. Sideways lean still strafes without walking.").changed(){self.dirty=true;if d.steps {d.feet_steps=false;d.thighs=false;d.lean=true;}}
+     if cols[0].checkbox(&mut d.steps,"Walk in place").on_hover_text("Forward movement and sprint require learned chest wobble. When leaning to strafe is enabled, sideways lean strafes without walking.").changed(){self.dirty=true;if d.steps {d.feet_steps=false;d.thighs=false;d.lean=true;}}
      cols[0].small("1 sensor · learn wobble first; lean to steer");
      if cols[0].checkbox(&mut d.feet_steps,"Walk in place with feet").on_hover_text("Requires chest + left and right foot sensors. Replaces chest wobble.").changed(){self.dirty=true;if d.feet_steps {d.steps=false;}}
      cols[0].small("3 sensors · chest + both feet");
 
      if !d.lean{d.backward=false;d.strafe=false;}
-     cols[0].add_enabled_ui(d.lean,|ui|{self.dirty|=ui.checkbox(&mut d.backward,"Allow backward movement").changed();self.dirty|=ui.checkbox(&mut d.strafe,"Lean left / right to strafe").changed();});
+     cols[0].add_enabled_ui(d.lean,|ui|{self.dirty|=ui.checkbox(&mut d.backward,"Allow backward movement").changed();self.dirty|=ui.checkbox(&mut d.strafe,"Enable leaning to strafe").changed();});
+     if !d.lean && d.feet_steps {cols[0].small("Enable lateral lean independently on Movement > Test.");}
      cols[1].label(RichText::new("ACTIONS").color(Color32::from_rgb(87,219,218)).strong());
      cols[1].add_enabled_ui(d.lean||d.feet_steps,|ui|{self.dirty|=ui.checkbox(&mut d.sprint_full_forward,if d.feet_steps {"Lean to sprint"} else {"Sprint past sprint ring"}).changed();});
      self.dirty|=cols[1].checkbox(&mut d.jump,"Jump (uses sensor calibration)").changed();

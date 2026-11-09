@@ -280,13 +280,11 @@ fn number(v: &Value) -> f32 {
 fn motion(v: &Value) -> Vec2 {
     // The receiver owns all mapping, speed, and slowdown. These are the same
     // float32 axes packed into ALC2, before the game-output arm gate.
-    // Foot-step speed is gated to zero in the receiver while output is disarmed.
-    // Test Room itself requires disarmed output, so use the independent live
-    // step preview below for these modes.
-    let foot_steps = v["step_input"] == "feet" && matches!(v["movement_engine"].as_str(), Some("body_tilt_steps" | "chest_heading_steps"));
-    if !foot_steps { if let Some(axes)=v["game_output_preview"]["travel_xy"].as_array() {
-        if axes.len()==2 {return Vec2::new(number(&axes[0]),number(&axes[1])).clamp_length_max(1.);}
-    }}
+    if let Some(axes)=v["game_output_preview"]["travel_xy"].as_array() {
+        if axes.len()==2 && axes.iter().all(|axis| axis.as_f64().is_some_and(|n| n.is_finite() && (n as f32).is_finite())) {
+            return Vec2::new(number(&axes[0]),number(&axes[1])).clamp_length_max(1.);
+        }
+    }
 
     let mode = v["movement_engine"].as_str().unwrap_or("");
     let speed = number(&v["locomotion"]["preview"]["speed"]).clamp(0., 1.);
@@ -1070,7 +1068,26 @@ mod tests {
         let v = serde_json::json!({"movement_engine":"body_tilt_steps","locomotion":{"preview":{"speed":0.5}},"actions":{"preview":{"travel_xy":[0.4,-0.8],"speed_multiplier":0.5}}});
         assert!((motion(&v) - Vec2::new(0.1, -0.2)).length() < 0.0001);
         let v = serde_json::json!({"movement_engine":"body_tilt_steps","step_input":"feet","game_output_preview":{"travel_xy":[0,0],"armed":false},"locomotion":{"preview":{"speed":0.5}},"actions":{"preview":{"travel_xy":[0.4,-0.8],"speed_multiplier":0.5}}});
-        assert!((motion(&v) - Vec2::new(0.1, -0.2)).length() < 0.0001);
+        assert_eq!(motion(&v), Vec2::ZERO, "an authoritative receiver stop must stay stopped");
+    }
+    #[test]
+    fn receiver_axes_own_heading_lateral_and_already_composed_limits() {
+        let mut v = serde_json::json!({"movement_engine":"chest_heading_steps","step_input":"feet","game_output_preview":{"travel_xy":[0.12,0.16],"armed":false},"locomotion":{"preview":{"speed":0.8}},"actions":{"settings":{"direction":{"max_output":0.25}},"preview":{"travel_xy":[-0.9,-0.9],"speed_multiplier":0.5}}});
+        assert!((motion(&v) - Vec2::new(0.12,0.16)).length()<0.00001, "receiver lateral, speed, cap and slowdown must be consumed once");
+        for axes in [serde_json::json!([0.,0.]),serde_json::json!([-0.12,0.16])] {
+            v["game_output_preview"]["travel_xy"]=axes.clone();
+            assert!((motion(&v)-Vec2::new(number(&axes[0]),number(&axes[1]))).length()<0.00001);
+        }
+    }
+    #[test]
+    fn missing_or_malformed_receiver_axes_use_legacy_heading_forward() {
+        let mut v=serde_json::json!({"movement_engine":"chest_heading_steps","step_input":"feet","locomotion":{"preview":{"speed":0.6}},"actions":{"preview":{"travel_xy":[0.8,-0.9],"speed_multiplier":0.5}}});
+        let forward=Vec2::new(0.,0.3);
+        assert!((motion(&v)-forward).length()<0.00001);
+        for axes in [serde_json::Value::Null,serde_json::json!([0.2]),serde_json::json!([0.2,0.3,0.4]),serde_json::json!([0.2,"invalid"]),serde_json::json!([null,0.3])] {
+            v["game_output_preview"]=serde_json::json!({"travel_xy":axes});
+            assert!((motion(&v)-forward).length()<0.00001, "malformed axes must not be partially consumed");
+        }
     }
 }
 

@@ -9,6 +9,13 @@ const SUB: Color32 = Color32::from_rgb(161, 179, 194);
 
 pub enum Action { Navigate(Page), Command(Value), Edit, Done, ResetCenter, SensorCalibration, SetMovement(bool), ForceSteamHome, BoundarySetup }
 
+fn fit_canvas(available: egui::Rect) -> (egui::Rect, f32) {
+    let scale = (available.width().max(0.) / 964.).min(available.height().max(0.) / 705.);
+    let size = egui::vec2(964., 705.) * scale;
+    let origin = available.min + egui::vec2((available.width() - size.x).max(0.) * 0.5, 0.);
+    (egui::Rect::from_min_size(origin, size), scale)
+}
+
 fn sensor_status(state: &Value, role: &str, online: bool) -> &'static str {
     if !online { return "Receiver offline"; }
     let sensor = &state["roles"][role];
@@ -104,8 +111,10 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
     let status=readiness(state,online,all);
     let is_ready=status=="Ready";
     // Positions are in the designer's 1024 x 765 reference, cropped to its window.
-    let scale=ui.available_width()/964.;
-    let (canvas,_)=ui.allocate_exact_size(egui::vec2(964.,705.)*scale,egui::Sense::hover());
+    // ScrollArea gives its child unbounded height. Its clip rectangle is the
+    // visible app area above the update footer, so fit the entire dashboard there.
+    let (canvas,scale)=fit_canvas(ui.available_rect_before_wrap().intersect(ui.clip_rect()));
+    ui.allocate_rect(canvas,egui::Sense::hover());
     let pos=|x:f32,y:f32| canvas.min+egui::vec2(x-30.,y-30.)*scale;
     let box_at=|x:f32,y:f32,w:f32,h:f32| egui::Rect::from_min_size(pos(x,y),egui::vec2(w,h)*scale);
     let uv=|x:f32,y:f32,w:f32,h:f32| egui::Rect::from_min_max(egui::pos2(x/1024.,y/765.),egui::pos2((x+w)/1024.,(y+h)/765.));
@@ -256,6 +265,51 @@ pub fn show(ui: &mut egui::Ui, state: &Value, online: bool, _busy: bool, editing
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn dashboard_canvas_fits_width_and_height_and_centers_in_extra_width() {
+        for size in [egui::vec2(964.,705.),egui::vec2(964.,640.),egui::vec2(1200.,520.),egui::vec2(600.,900.)] {
+            let available=egui::Rect::from_min_size(egui::pos2(11.,27.),size);
+            let (canvas,scale)=fit_canvas(available);
+            assert!(canvas.left()>=available.left()-0.01 && canvas.right()<=available.right()+0.01);
+            assert!(canvas.top()>=available.top()-0.01 && canvas.bottom()<=available.bottom()+0.01);
+            assert!((canvas.center().x-available.center().x).abs()<0.01);
+            assert!((canvas.width()/canvas.height()-964./705.).abs()<0.001);
+            assert!((canvas.width()-available.width()).abs()<0.01 || (canvas.height()-available.height()).abs()<0.01);
+            // The lowest banner and the top-right Settings target stay visible.
+            for (x,y) in [(30.,612.),(472.,677.),(912.,56.),(954.,98.)] {
+                assert!(available.contains(canvas.min+egui::vec2(x,y)*scale));
+            }
+        }
+    }
+
+    #[test]
+    fn short_scrolling_viewport_keeps_scaled_dashboard_targets_clickable() {
+        let ctx=egui::Context::default();
+        let state=serde_json::json!({"sensor_layout":{"count":1}});
+        let available=egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(964.,620.));
+        let (canvas,scale)=fit_canvas(available);
+        let mut frame=|events|{
+            let mut result=None;
+            let _=ctx.run(egui::RawInput {screen_rect:Some(available),events,..Default::default()},|ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui| {
+                    egui::ScrollArea::vertical().show(ui,|ui| {result=show(ui,&state,true,false,false,false);});
+                });
+            });
+            result
+        };
+        frame(vec![]);
+        for (point,settings) in [(egui::vec2(87.,530.),false),(egui::vec2(933.,77.),true)] {
+            let pos=canvas.min+point*scale;
+            for pressed in [true,false] {
+                let action=frame(vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);
+                if !pressed {
+                    if settings {assert!(matches!(action,Some(Action::Navigate(Page::Settings))));}
+                    else {assert!(matches!(action,Some(Action::Navigate(Page::QuickSetup))));}
+                }
+            }
+        }
+    }
+
     #[test]
     fn skin_targets_dispatch_real_dashboard_actions() {
         let ctx=egui::Context::default();

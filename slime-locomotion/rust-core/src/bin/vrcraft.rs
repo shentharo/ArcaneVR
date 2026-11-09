@@ -6,6 +6,8 @@ mod receiver;
 
 #[path = "../desktop/chest_tuning.rs"]
 mod chest_tuning;
+#[path = "../desktop/strafe_toggle.rs"]
+mod strafe_toggle;
 #[path = "../desktop/game_profiles.rs"]
 mod game_profiles;
 #[path = "../desktop/home_dashboard.rs"]
@@ -414,7 +416,10 @@ impl eframe::App for ArcaneVR {
         if status.online && !show_steps {
             if self.test_settings_tab == 1 { self.test_settings_tab = 0; }
         }
-        let mut install_update = false;
+        let install_update = egui::TopBottomPanel::bottom("update_status")
+            .frame(egui::Frame::new().fill(pages::BG).inner_margin(egui::Margin::symmetric(8, 4)))
+            .show(ctx, |ui| self.updater.show(ui, status.online && !busy && s["armed"] != true))
+            .inner;
         if self.page != pages::Page::Home { egui::TopBottomPanel::top("title")
             .frame(
                 egui::Frame::new()
@@ -493,7 +498,6 @@ impl eframe::App for ArcaneVR {
                         if !enabled { self.send(json!({"command":"arm"})); } else { self.walking=false; self.test_room.stop(); self.send(json!({"command":"stop"})); }
                     }
                     if ui.selectable_label(matches!(self.page, Page::QuickSetup | Page::Devices), "Sensors").clicked() { self.page = Page::QuickSetup; }
-                    install_update = self.updater.show(ctx, ui, status.online && !busy && s["armed"] != true);
                     let drag_width = (ui.available_width() - 110.).max(0.);
                     let (_, drag) = ui.allocate_exact_size(egui::vec2(drag_width, 30.), egui::Sense::click_and_drag());
                     if drag.drag_started() { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag); }
@@ -702,6 +706,7 @@ impl eframe::App for ArcaneVR {
                 pages::Page::Profiles=>{if let Some(command)=self.action_pages.profiles(ui,s,status.online){self.walking=false;self.send(json!({"command":"stop"}));self.send(command);}},
                 pages::Page::TestRoom=>{
                     if !status.error.is_empty(){ui.colored_label(Color32::YELLOW,&status.error);}
+                    if let Some(command)=strafe_toggle::show(ui,s,status.online,busy){self.walking=false;self.send(json!({"command":"stop"}));self.send(command);}
                     if status.online && !busy && s["mode"]=="live" && s["armed"]==false && s["calibration_ready"]==true
                         && (s["calibrated"]!=true || s["actions"]["preview"]["calibrated"]!=true)
                         && s["feet_learning"]["active"]!=true && (s["sensor_calibration"].is_null() || matches!(s["sensor_calibration"]["stage"].as_str(),Some("done"|"canceled")))
@@ -713,7 +718,7 @@ impl eframe::App for ArcaneVR {
                             ui.colored_label(pages::ORANGE,"Learn walking first: forward movement requires a saved walking pattern for this chest sensor.");
                             if ui.button("Learn walking in Steps").clicked(){self.page=Page::Steps;}
                         }else{ui.label("Walking pattern loaded. Lean forward and walk in place to move; stop walking to stop forward movement.");}
-                        ui.small("The crosshair always shows lean. Sideways lean still strafes without walking.");
+                        ui.small(strafe_toggle::chest_walking_hint(s));
                     }
 
                     self.new_test=true;

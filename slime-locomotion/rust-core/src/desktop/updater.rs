@@ -10,7 +10,7 @@ const API: &str = "https://api.github.com/repos/shentharo/ArcaneVR/releases/late
 
 enum Event { Checked(Result<Option<Release>, String>), Staged(Result<PathBuf, String>) }
 pub struct Updater {
-    open: bool,
+    qa_fixture: bool,
     busy: bool,
     message: String,
     release: Option<Release>,
@@ -21,8 +21,13 @@ pub struct Updater {
 impl Default for Updater {
     fn default() -> Self {
         let (sender, events) = mpsc::channel();
-        let qa = std::env::args().collect::<Vec<_>>().windows(2).any(|p| p[0]=="--qa-page" && p[1]=="updates");
-        let updater = Self { open: qa, busy: qa, message: if qa {"Checking GitHub releases…".into()} else {String::new()}, release: None, request: None, events, sender };
+        let args: Vec<String> = std::env::args().collect();
+        let qa = args.windows(2).any(|p| p[0]=="--qa-page" && p[1]=="updates");
+        let fixture = args.windows(2).find(|p| p[0]=="--qa-update-state")
+            .filter(|_| qa || args.iter().any(|a| a=="--qa-screenshot"))
+            .map(|p| p[1].as_str());
+        let mut updater = Self { qa_fixture: false, busy: qa, message: if qa {"Checking GitHub releases…".into()} else {String::new()}, release: None, request: None, events, sender };
+        if let Some(state) = fixture { updater.set_qa_fixture(state); return updater; }
         if qa { let tx=updater.sender.clone(); thread::spawn(move || { let _=tx.send(Event::Checked(check())); }); }
         updater
     }
@@ -87,7 +92,26 @@ $ticks=(Get-Process -Id {}).StartTime.ToUniversalTime().Ticks
     Ok(request)
 }
 impl Updater {
-    pub fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, can_install: bool) -> bool {
+    // Opt-in rendering fixtures never contact GitHub or launch an installer.
+    fn set_qa_fixture(&mut self, state: &str) {
+        self.qa_fixture = true;
+        self.busy = state == "downloading";
+        let (prefix, patch) = CURRENT_VERSION.rsplit_once('.').unwrap_or((CURRENT_VERSION, "0"));
+        let version = format!("{prefix}.{}", patch.parse::<u32>().unwrap_or(0) + 1);
+        if matches!(state, "available" | "downloading" | "ready") {
+            self.release = Some(Release { version: version.clone(), executable_url: String::new(), sha256: String::new(), notes_url: "https://github.com/shentharo/ArcaneVR/releases".into(), size: 0 });
+        }
+        if state == "ready" { self.request = Some(PathBuf::from("qa-fixture-not-an-install-request")); }
+        self.message = match state {
+            "available" => format!("Version {version} is available."),
+            "current" => "No newer published release is available.".into(),
+            "error" => "Update failed: QA connection error".into(),
+            "downloading" => "Downloading and verifying…".into(),
+            "ready" => "Download verified. Ready to install and restart.".into(),
+            _ => "Unknown QA update state".into(),
+        };
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, can_install: bool) -> bool {
         for event in self.events.try_iter() {
             self.busy = false;
             if let Event::Checked(result)=&event {
@@ -98,37 +122,40 @@ impl Updater {
                 }
             }
             match event {
-                Event::Checked(Ok(Some(release))) => { self.message=format!("Version {} is available.", release.version); self.release=Some(release); }
-                Event::Checked(Ok(None)) => self.message="No newer published release is available.".into(),
-                Event::Checked(Err(e)) | Event::Staged(Err(e)) => self.message=format!("Update failed: {e}"),
+                Event::Checked(Ok(Some(release))) => { self.request=None; self.message=format!("Version {} is available.", release.version); self.release=Some(release); }
+                Event::Checked(Ok(None)) => { self.release=None; self.request=None; self.message="No newer published release is available.".into(); }
+                Event::Checked(Err(e)) => { self.release=None; self.request=None; self.message=format!("Update failed: {e}"); }
+                Event::Staged(Err(e)) => { self.request=None; self.message=format!("Update failed: {e}"); }
                 Event::Staged(Ok(request)) => { self.request=Some(request); self.message="Download verified. Ready to install and restart.".into(); }
             }
         }
-        if ui.button("Updates").clicked() { self.open=true; }
         let mut install=false;
-        egui::Window::new("ArcaneVR updates").open(&mut self.open).resizable(false).default_width(480.).show(ctx, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if self.qa_fixture { ui.label("QA preview"); }
             ui.label(format!("Installed version {CURRENT_VERSION}"));
-            if ui.add_enabled(!self.busy, egui::Button::new("Check for updates")).clicked() {
+            if ui.add_enabled(!self.busy && !self.qa_fixture, egui::Button::new("Check for updates")).clicked() {
                 self.busy=true; self.release=None; self.request=None; self.message="Checking GitHub releases…".into();
                 let tx=self.sender.clone(); thread::spawn(move || { let _=tx.send(Event::Checked(check())); });
             }
-            ui.label(&self.message);
+            if self.busy { ui.spinner(); }
+            if !self.message.is_empty() { ui.label(&self.message); }
             if let Some(release)=&self.release {
                 ui.hyperlink_to("Release notes", &release.notes_url);
-                if self.request.is_none() && ui.add_enabled(!self.busy, egui::Button::new("Download update")).clicked() {
+                if self.request.is_none() && ui.add_enabled(!self.busy && !self.qa_fixture, egui::Button::new("Download update")).clicked() {
                     self.busy=true; self.message="Downloading and verifying…".into();
                     let tx=self.sender.clone(); let release=release.clone(); thread::spawn(move || { let _=tx.send(Event::Staged(stage(&release))); });
                 }
             }
             if self.request.is_some() {
                 ui.label("ArcaneVR will close and restart. Your sensor settings are kept.");
-                if ui.add_enabled(can_install && !self.busy, egui::Button::new("Install and restart")).clicked() { install=true; }
+                if ui.add_enabled(can_install && !self.busy && !self.qa_fixture, egui::Button::new("Install and restart")).clicked() { install=true; }
                 if !can_install { ui.label("Stop game movement and wait for the receiver before installing."); }
             }
         });
         install
     }
     pub fn launch_installer(&mut self) -> Result<(), String> {
+        if self.qa_fixture { return Err("QA update previews cannot install updates".into()); }
         let request=self.request.as_ref().ok_or("No verified update staged")?;
         let script=request.with_file_name("install.ps1");
         ps(&format!("& {} -Request {}", literal(&script.to_string_lossy()), literal(&request.to_string_lossy())))
@@ -141,6 +168,86 @@ impl Updater {
 #[cfg(test)]
 mod download_tests {
     use super::*;
+    fn release() -> Release {
+        Release { version: "9.9.9".into(), executable_url: String::new(), sha256: String::new(), notes_url: "https://github.com/shentharo/ArcaneVR/releases".into(), size: 0 }
+    }
+    fn frame(updater: &mut Updater, ctx: &egui::Context, can_install: bool, events: Vec<egui::Event>) -> (bool, Vec<(String, egui::Rect)>) {
+        let mut install = false;
+        let output = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200., 800.))), events, ..Default::default() }, |ctx| {
+            egui::TopBottomPanel::bottom("updates").show(ctx, |ui| { install = updater.show(ui, can_install); });
+            egui::CentralPanel::default().show(ctx, |ui| { ui.label("Home page content"); });
+        });
+        fn texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((t.galley.job.text.clone(), egui::Rect::from_min_size(t.pos, t.galley.size()))),
+                egui::Shape::Vec(shapes) => for shape in shapes { texts(shape, out); },
+                _ => (),
+            }
+        }
+        let mut text = Vec::new();
+        for clipped in output.shapes { texts(&clipped.shape, &mut text); }
+        assert!(ctx.memory(|m| m.areas().visible_layer_ids().iter().all(|layer| layer.order != egui::Order::Middle)), "updater must not create a floating window");
+        (install, text)
+    }
+    fn render(updater: &mut Updater) -> Vec<String> {
+        frame(updater, &egui::Context::default(), true, vec![]).1.into_iter().map(|(text, _)| text).collect()
+    }
+    #[test]
+    fn renders_installed_version_and_available_controls_inline_with_home() {
+        let mut updater = Updater::default();
+        let text = render(&mut updater);
+        assert!(text.contains(&format!("Installed version {CURRENT_VERSION}")));
+        assert!(text.contains(&"Check for updates".into()));
+        assert!(text.contains(&"Home page content".into()));
+        assert!(!text.contains(&"Download update".into()));
+        updater.sender.send(Event::Checked(Ok(Some(release())))).unwrap();
+        let text = render(&mut updater);
+        for expected in ["Version 9.9.9 is available.", "Release notes", "Download update"] { assert!(text.contains(&expected.into()), "missing {expected}"); }
+        assert!(!text.contains(&"Install and restart".into()));
+    }
+    #[test]
+    fn check_results_clear_stale_release_and_staging_errors_allow_download_retry() {
+        let mut updater = Updater::default();
+        for event in [Event::Checked(Ok(None)), Event::Checked(Err("offline".into()))] {
+            updater.release = Some(release()); updater.request = Some("stale.json".into()); updater.busy = true;
+            updater.sender.send(event).unwrap();
+            render(&mut updater);
+            assert!(!updater.busy); assert!(updater.release.is_none()); assert!(updater.request.is_none());
+        }
+        updater.release = Some(release()); updater.request = Some("stale.json".into()); updater.busy = true;
+        updater.sender.send(Event::Staged(Err("checksum mismatch".into()))).unwrap();
+        let text = render(&mut updater);
+        assert!(text.contains(&"Update failed: checksum mismatch".into()));
+        assert!(text.contains(&"Download update".into()));
+        assert!(!updater.busy); assert!(updater.request.is_none());
+    }
+    #[test]
+    fn verified_install_requires_guard_and_survives_launch_error_for_retry() {
+        let mut updater = Updater::default();
+        updater.release = Some(release());
+        updater.sender.send(Event::Staged(Ok("verified-request.json".into()))).unwrap();
+        let ctx = egui::Context::default();
+        frame(&mut updater, &ctx, false, vec![]);
+        let (_, text) = frame(&mut updater, &ctx, false, vec![]);
+        let pos = text.iter().find(|(t, _)| t == "Install and restart").unwrap().1.center();
+        let click = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&mut updater, &ctx, false, vec![egui::Event::PointerMoved(pos), click(true)]);
+        assert!(!frame(&mut updater, &ctx, false, vec![click(false)]).0);
+        frame(&mut updater, &ctx, true, vec![egui::Event::PointerMoved(pos)]);
+        frame(&mut updater, &ctx, true, vec![click(true)]);
+        assert!(frame(&mut updater, &ctx, true, vec![click(false)]).0);
+        updater.error("Update was not installed: helper unavailable".into());
+        let text = render(&mut updater);
+        assert!(text.contains(&"Install and restart".into()));
+        assert!(updater.request.is_some());
+    }
+    #[test]
+    fn qa_fixture_cannot_launch_installer() {
+        let mut updater = Updater::default();
+        updater.set_qa_fixture("ready");
+        assert!(render(&mut updater).contains(&"QA preview".into()));
+        assert_eq!(updater.launch_installer().unwrap_err(), "QA update previews cannot install updates");
+    }
     #[test]
     #[ignore = "downloads the public release for updater integration QA"]
     fn stages_real_release_with_verified_checksum() {

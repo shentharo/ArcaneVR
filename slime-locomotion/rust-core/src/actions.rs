@@ -25,6 +25,7 @@ pub struct Direction {
     pub decouple_strength: f64,
     pub forward_only: bool,
     pub strafe_enabled: bool,
+    pub heading_strafe_enabled: bool,
     pub sprint_full_forward: bool,
     pub sprint_angle: Option<f64>,
     pub backward_deadzone_multiplier: f64,
@@ -97,6 +98,7 @@ impl Default for Direction {
             decouple_strength: 1.,
             forward_only: false,
             strafe_enabled: true,
+            heading_strafe_enabled: false,
             sprint_full_forward: false, sprint_angle:None,
             backward_deadzone_multiplier: 1.,
             max_output: 1.,
@@ -231,7 +233,7 @@ impl Settings {
         let j = &self.jump;
         let c = &self.crouch;
         let t = &self.turn;
-        json!({"direction":{"enabled":d.enabled,"deadzone":d.deadzone,"forward_deadzone":d.forward_deadzone,"backward_deadzone":d.backward_deadzone,"left_deadzone":d.left_deadzone,"right_deadzone":d.right_deadzone,"max_angle":d.max_angle,"horizontal_max_angle":d.horizontal_max_angle,"forward_max_angle":d.forward_max_angle,"forward_offset":d.forward_offset,"smoothing_ms":d.smoothing_ms,"exponent":d.exponent,"pitch_sign":d.pitch_sign,"roll_sign":d.roll_sign,"pitch_axis":d.pitch_axis,"roll_axis":d.roll_axis,"decouple":d.decouple,"decouple_strength":d.decouple_strength,"forward_only":d.forward_only,"strafe_enabled":d.strafe_enabled,"sprint_full_forward":d.sprint_full_forward,"sprint_angle":d.sprint_angle,"backward_deadzone_multiplier":d.backward_deadzone_multiplier,"max_output":d.max_output,"learned_forward":d.learned_forward,"learned_right":d.learned_right},"jump":{"enabled":j.enabled,"source":j.source,"accel_axis":j.accel_axis,"height_window_seconds":j.height_window_seconds,"accel_window_seconds":j.accel_window_seconds,"angle_compensation_percent":j.angle_compensation_percent,"compensation_axis":j.compensation_axis,"suppress_threshold":j.suppress_threshold,"threshold":j.threshold,"release":j.release,"pulse_seconds":j.pulse_seconds,"cooldown_seconds":j.cooldown_seconds},"crouch":{"enabled":c.enabled,"enter":c.enter,"exit":c.exit,"mode":c.mode,"height_correction":c.height_correction,"use_reset_offset":c.use_reset_offset,"reference_height":c.reference_height,"pulse_seconds":c.pulse_seconds,"slowdown":c.slowdown},"turn":{"enabled":t.enabled,"horizontal":t.horizontal,"vertical":t.vertical,"deadzone":t.deadzone,"max_angle":t.max_angle,"exponent":t.exponent,"yaw_sign":t.yaw_sign,"pitch_sign":t.pitch_sign}})
+        json!({"direction":{"enabled":d.enabled,"deadzone":d.deadzone,"forward_deadzone":d.forward_deadzone,"backward_deadzone":d.backward_deadzone,"left_deadzone":d.left_deadzone,"right_deadzone":d.right_deadzone,"max_angle":d.max_angle,"horizontal_max_angle":d.horizontal_max_angle,"forward_max_angle":d.forward_max_angle,"forward_offset":d.forward_offset,"smoothing_ms":d.smoothing_ms,"exponent":d.exponent,"pitch_sign":d.pitch_sign,"roll_sign":d.roll_sign,"pitch_axis":d.pitch_axis,"roll_axis":d.roll_axis,"decouple":d.decouple,"decouple_strength":d.decouple_strength,"forward_only":d.forward_only,"strafe_enabled":d.strafe_enabled,"heading_strafe_enabled":d.heading_strafe_enabled,"sprint_full_forward":d.sprint_full_forward,"sprint_angle":d.sprint_angle,"backward_deadzone_multiplier":d.backward_deadzone_multiplier,"max_output":d.max_output,"learned_forward":d.learned_forward,"learned_right":d.learned_right},"jump":{"enabled":j.enabled,"source":j.source,"accel_axis":j.accel_axis,"height_window_seconds":j.height_window_seconds,"accel_window_seconds":j.accel_window_seconds,"angle_compensation_percent":j.angle_compensation_percent,"compensation_axis":j.compensation_axis,"suppress_threshold":j.suppress_threshold,"threshold":j.threshold,"release":j.release,"pulse_seconds":j.pulse_seconds,"cooldown_seconds":j.cooldown_seconds},"crouch":{"enabled":c.enabled,"enter":c.enter,"exit":c.exit,"mode":c.mode,"height_correction":c.height_correction,"use_reset_offset":c.use_reset_offset,"reference_height":c.reference_height,"pulse_seconds":c.pulse_seconds,"slowdown":c.slowdown},"turn":{"enabled":t.enabled,"horizontal":t.horizontal,"vertical":t.vertical,"deadzone":t.deadzone,"max_angle":t.max_angle,"exponent":t.exponent,"yaw_sign":t.yaw_sign,"pitch_sign":t.pitch_sign}})
     }
     pub fn from_json(v: &Value) -> Result<Self, &'static str> {
         let obj = v.as_object().ok_or("settings must be object")?;
@@ -280,6 +282,7 @@ impl Settings {
                     ("direction", "backward_deadzone_multiplier") => number!(s.direction.backward_deadzone_multiplier),
                     ("direction", "forward_only") => boolean!(s.direction.forward_only),
                     ("direction", "strafe_enabled") => boolean!(s.direction.strafe_enabled),
+                    ("direction", "heading_strafe_enabled") => boolean!(s.direction.heading_strafe_enabled),
                     ("direction", "sprint_full_forward") => boolean!(s.direction.sprint_full_forward),
                     ("direction", "max_output") => number!(s.direction.max_output),
                     ("direction", "decouple_strength") => number!(s.direction.decouple_strength),
@@ -555,6 +558,20 @@ impl ActionProcessor {
         self.settings.direction.decouple = decouple;
         self.settings.direction.enabled = enabled;
         if !enabled {result.travel_xy=[0.,0.];}
+        result
+    }
+    /// Chest-relative lateral preview for feet-driven heading movement. Forward
+    /// remains owned by the feet engine, independent of the legacy tilt gate.
+    pub fn process_heading_strafe(&mut self, input: &Input) -> Telemetry {
+        let (enabled, decouple, strafe) = (self.settings.direction.enabled, self.settings.direction.decouple, self.settings.direction.strafe_enabled);
+        self.settings.direction.enabled = true;
+        self.settings.direction.decouple = false;
+        self.settings.direction.strafe_enabled = true;
+        let mut result = self.process(input);
+        self.settings.direction.enabled = enabled;
+        self.settings.direction.decouple = decouple;
+        self.settings.direction.strafe_enabled = strafe;
+        result.travel_xy[1] = 0.;
         result
     }
     pub fn calibrate(&mut self, i: &Input) -> Result<(), &'static str> {
@@ -951,6 +968,38 @@ mod tests {
                 roll: 0.,
                 seen: t,
             }),
+        }
+    }
+    #[test]
+    fn heading_strafe_is_explicit_persisted_and_strict() {
+        assert!(!Settings::from_json(&json!({"direction":{"enabled":true,"strafe_enabled":true}})).unwrap().direction.heading_strafe_enabled);
+        let settings = Settings::from_json(&json!({"direction":{"heading_strafe_enabled":true}})).unwrap();
+        assert!(Settings::from_json(&settings.to_json()).unwrap().direction.heading_strafe_enabled);
+        for value in [json!(1), json!("true"), Value::Null] {
+            assert!(Settings::from_json(&json!({"direction":{"heading_strafe_enabled":value}})).is_err());
+        }
+    }
+    #[test]
+    fn heading_strafe_bypasses_legacy_gates_restores_settings_and_never_leaks_forward() {
+        for sprint in [false, true] {
+            let mut settings = Settings::default();
+            settings.direction.enabled=false; settings.direction.decouple=true; settings.direction.strafe_enabled=false;
+            settings.direction.sprint_full_forward=sprint;
+            settings.direction.learned_forward=Some([1.,0.,0.]); settings.direction.learned_right=Some([0.,1.,0.]);
+            let mut p=ActionProcessor::new(settings.clone()).unwrap();
+            let mut baseline=ActionProcessor::new(settings).unwrap();
+            p.set_world_up([0.,0.,1.]);baseline.set_world_up([0.,0.,1.]);
+            let center=input(0.);
+            p.calibrate_chest_preview(&center).unwrap(); baseline.calibrate_chest_preview(&center).unwrap();
+            let mut lean=input(0.1);lean.hmd=None;
+            lean.chest.as_mut().unwrap().value=[0.8f64.cos(),0.,0.8f64.sin(),0.];
+            let actual=p.process_heading_strafe(&lean);
+            let old=baseline.process_chest_preview(&lean);
+            assert!(actual.travel_xy[0]>0.); assert_eq!(actual.travel_xy[1],0.);
+            assert_eq!(actual.sprint_pressed, old.sprint_pressed); assert_eq!(actual.sprint_pressed,sprint);
+            let d=&p.settings().direction;
+            assert!(!d.enabled && d.decouple && !d.strafe_enabled);
+            lean.t=0.6; assert_eq!(p.process_heading_strafe(&lean).travel_xy,[0.;2]);
         }
     }
     #[test] fn walking_gate_preserves_crosshair_and_strafe() {

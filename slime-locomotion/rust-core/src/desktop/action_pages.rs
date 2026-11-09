@@ -153,7 +153,11 @@ impl ActionPages {
                         self.dirty |= slider(ui, v, "exponent", "Response exponent", 0.1..=5., 1.);
                         ui.separator();
                         self.dirty |= check(ui, v, "forward_only", "Forward only");
-                        self.dirty |= check(ui, v, "strafe_enabled", "Enable strafing");
+                        let heading_mode = state["movement_engine"] == "chest_heading_steps";
+                        self.dirty |= check(ui, v, if heading_mode {"heading_strafe_enabled"} else {"strafe_enabled"}, "Enable leaning to strafe");
+                        if heading_mode {
+                            ui.small("Feet control forward speed; leaning left/right adds strafing while stepping. This works independently of Direction Enabled.");
+                        }
                         self.dirty |= check(ui, v, "sprint_full_forward", "Sprint at full forward lean");
                         self.dirty |= slider(ui, v, "max_output", "Maximum stick output", 0.05..=1.0, 1.);
                         if v["decouple"] == true {
