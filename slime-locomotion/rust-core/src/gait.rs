@@ -20,7 +20,7 @@ fn mul(a: Q, b: Q) -> Q {
         w * k + x * j - y * i + z * v,
     ]
 }
-fn gravity(q: Q, y_up: bool) -> [f64; 3] {
+pub(crate) fn gravity(q: Q, y_up: bool) -> [f64; 3] {
     let [w, x, y, z] = q;
     if y_up {
         [
@@ -63,6 +63,7 @@ pub struct Detection {
     /// Step-rhythm speed from both feet (three-sensor mode). Excludes `continuous`.
     pub cadence: bool,
     pub motion: Settings,
+    pub foot_motion: crate::foot_motion::Settings,
     pub accel_has_gravity: bool,
     pub threshold: f64,
     pub release: f64,
@@ -79,6 +80,7 @@ impl Default for Detection {
             continuous: false,
             cadence: false,
             motion: Settings::default(),
+            foot_motion: crate::foot_motion::Settings::default(),
             accel_has_gravity: false,
             threshold: 2.,
             release: 0.7,
@@ -91,6 +93,7 @@ impl Default for Detection {
 }
 impl Detection {
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.foot_motion.validate()?;
         self.motion
             .validate()
             .map_err(|_| "Invalid locomotion settings")?;
@@ -116,6 +119,9 @@ pub struct Engine {
     pub motion: MotionFilter,
     pub cadence: Cadence,
     pub cadence_state: crate::cadence::CadenceState,
+    foot_intent: crate::foot_motion::Guard,
+    pivot_suppressed: bool,
+    pivot_since: Option<f64>,
     pub diagnostic_motion: MotionFilter,
     pub diagnostic: Telemetry,
     diagnostic_baseline: Option<[f64;3]>,
@@ -143,7 +149,8 @@ impl Engine {
         motion.set_single_input(cfg.chest_steps);
         let mut diagnostic_motion=MotionFilter::new(cfg.motion.clone()).expect("validated motion settings");diagnostic_motion.set_single_input(true);
         Self {
-            motion, cadence: Cadence::default(), cadence_state: Default::default(), diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
+            motion, cadence: Cadence::default(), cadence_state: Default::default(),
+            foot_intent: Default::default(), pivot_suppressed: false, pivot_since: None, diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
             preview: Default::default(),
             sensors: Default::default(),
             cfg,
@@ -162,6 +169,42 @@ impl Engine {
             origin: IDENTITY,
             last_tick: 0.,
         }
+    }
+    /// Live guard adjustment leaves the current walk, calibration and output state intact.
+    pub fn update_foot_motion_settings(&mut self, settings: crate::foot_motion::Settings) -> Result<(), &'static str> {
+        settings.validate()?;
+        self.cfg.foot_motion = settings;
+        self.foot_intent.clear();
+        self.pivot_suppressed = false;
+        self.pivot_since = None;
+        Ok(())
+    }
+    pub fn foot_motion_snapshot(&self, t: f64) -> serde_json::Value {
+        self.foot_intent.snapshot(t, &self.cfg.foot_motion, self.pivot_suppressed)
+    }
+    fn feed_cadence(&mut self, role: usize, t: f64) {
+        if !self.cfg.cadence { return; }
+        let settings = &self.cfg.foot_motion;
+        let evidence = [self.foot_intent.evidence(0, t, settings), self.foot_intent.evidence(1, t, settings)];
+        let pivot = settings.enabled && evidence.iter().any(|e| e.pivot)
+            && !evidence.iter().any(|e| e.qualified);
+        // A stride apex can briefly have little gravity-vector excursion. Also,
+        // the opposite foot's next packet can arrive later at the same timestamp.
+        // Only sustained evidence from both feet confirms an actual pivot episode.
+        if pivot {
+            let since = *self.pivot_since.get_or_insert(t);
+            if t >= since && t - since >= crate::foot_motion::PIVOT_STOP_CONFIRMATION {
+                if !self.pivot_suppressed { self.cadence.stop(); }
+                self.pivot_suppressed = true;
+            }
+        } else {
+            self.pivot_since = None;
+            self.pivot_suppressed = false;
+        }
+        // Replace both channels atomically, including on rejected acceleration events.
+        let allowed = !settings.enabled || (evidence[role].qualified && evidence[role].ready);
+        let (tilt, tilt_at, accel, accel_at) = self.foot_intent.sample(role, t, allowed);
+        self.cadence.sample(role, tilt, tilt_at, accel, accel_at, t);
     }
     pub fn fresh(&self, t: f64) -> bool {
         t.is_finite()
@@ -205,6 +248,9 @@ impl Engine {
         }
         self.motion.clear_history();
         self.cadence.stop();
+        self.foot_intent.clear();
+        self.pivot_suppressed = false;
+        self.pivot_since = None;
         self.preview = Default::default();
         self.speed = 0.;
         self.steps.clear();
@@ -232,6 +278,9 @@ impl Engine {
         self.steps.clear();
         self.motion.reset();
         self.cadence.stop();
+        self.foot_intent.clear();
+        self.pivot_suppressed = false;
+        self.pivot_since = None;
         self.preview = Default::default();
     }
     pub fn update(&mut self, role: usize, q: Q, t: f64) -> Result<(), &'static str> {
@@ -269,7 +318,10 @@ impl Engine {
             return Ok(());
         }
         let angular = s.angular;
-        self.cadence.tilt(role, angular, t);
+        if self.cfg.cadence {
+            self.foot_intent.orientation(role, q, angular, t, self.cfg.y_up);
+            self.feed_cadence(role, t);
+        }
         let s = &mut self.sensors[role];
         if s.angular < self.cfg.release {
             s.ready = true;
@@ -341,8 +393,9 @@ impl Engine {
             .sum::<f64>()
             .sqrt();
         self.accel_dynamic[role] = dynamic;
-        if !self.cfg.chest_steps {
-            self.cadence.acceleration(role, dynamic, t);
+        if self.cfg.cadence && !self.cfg.chest_steps {
+            self.foot_intent.acceleration(role, dynamic, t);
+            self.feed_cadence(role, t);
         }
         self.motion
             .update_foot(role, std::array::from_fn(|i| a[i] - baseline[i]), t)?;
@@ -732,4 +785,132 @@ mod tests {
   e.update(0,[(0.01_f64).cos(),0.01_f64.sin(),0.,0.],1.02).unwrap();
   assert!((e.sensors[0].angular-1.).abs()<0.001,"{}",e.sensors[0].angular);
  }
+}
+
+#[cfg(test)]
+mod foot_intent_tests {
+    use super::*;
+    fn rotation(axis: [f64; 3], angle: f64) -> Q {
+        let h = angle / 2.; [h.cos(), axis[0] * h.sin(), axis[1] * h.sin(), axis[2] * h.sin()]
+    }
+    fn frame(e: &mut Engine, t: f64, tilts: [f64; 2], yaw: f64,
+             accelerations: [f64; 2], mount: Q, accel_first: bool, flip_sign: bool) {
+        let up = if e.cfg.y_up { [0., 1., 0.] } else { [0., 0., 1.] };
+        let turn = rotation(up, yaw);
+        e.update(2, turn, t).unwrap();
+        for side in 0..2 {
+            let mut q = mul(mul(turn, rotation([1., 0., 0.], tilts[side])), mount);
+            if flip_sign { q = q.map(|x| -x); }
+            if accel_first { e.update_acceleration(side, [accelerations[side], 0., 0.], t).unwrap(); }
+            e.update(side, q, t).unwrap();
+            if !accel_first { e.update_acceleration(side, [accelerations[side], 0., 0.], t).unwrap(); }
+        }
+        e.tick(t);
+    }
+    fn engine(y_up: bool, mount: Q) -> Engine {
+        let mut cfg = Detection::default(); cfg.cadence = true; cfg.y_up = y_up;
+        let mut e = Engine::new(cfg);
+        frame(&mut e, 0., [0.; 2], 0., [0.; 2], mount, false, false);
+        e.calibrate(0.).unwrap();
+        frame(&mut e, 0.01, [0.; 2], 0., [0.; 2], mount, false, false);
+        e.arm(0.01).unwrap(); e
+    }
+    fn stride(e: &mut Engine, t: f64, rate: f64, degrees: f64, yaw: f64, mount: Q, first: bool) {
+        let period = 2. / rate;
+        let mut tilts = [0.; 2]; let mut accel = [0.; 2];
+        for side in 0..2 {
+            let phase = (t - side as f64 * period / 2.).rem_euclid(period);
+            if phase < 0.3 { tilts[side] = degrees.to_radians() * (phase / 0.3 * std::f64::consts::PI).sin(); }
+            accel[side] = if (0.12..0.20).contains(&phase) { if degrees < 3. { 1.3 } else { 3. } } else { 0. };
+        }
+        frame(e, t, tilts, yaw, accel, mount, first, (t * 100.).round() as usize % 2 == 0);
+    }
+    #[test]
+    fn realistic_yaw_dominant_pivot_with_roll_and_acceleration_never_walks() {
+        let mount = unit([0.6, 0.3, -0.4, 0.5]).unwrap();
+        for y_up in [false, true] {
+            let mut e = engine(y_up, mount);
+            for n in 2..601 {
+                let t = n as f64 * 0.01;
+                let roll = (t * 20.).sin() * 4_f64.to_radians();
+                frame(&mut e, t, [roll, -roll], t * 4., [4., 3.], mount, n % 2 == 0, n % 3 == 0);
+                assert_eq!(e.speed, 0., "pivot moved at {t}: {}", e.foot_motion_snapshot(t));
+            }
+            assert_eq!(e.cadence_state.steps, [0, 0]);
+        }
+    }
+    #[test]
+    fn tiny_fast_jitter_with_acceleration_does_not_count() {
+        let mut e = engine(false, IDENTITY);
+        for n in 20..2000 {
+            let t = n as f64 * 0.001;
+            let tilt = 0.15_f64.to_radians() * (t * 1200.).sin();
+            frame(&mut e, t, [tilt, -tilt], 0., [3.; 2], IDENTITY, false, n % 2 == 0);
+            assert_eq!(e.speed, 0.);
+        }
+        assert_eq!(e.cadence_state.steps, [0, 0]);
+    }
+    #[test]
+    fn gentle_slow_alternating_swings_with_small_impacts_keep_walking() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..1000 {
+            let t = n as f64 * 0.01;
+            stride(&mut e, t, 1., 2.5, 0., IDENTITY, false);
+        }
+        assert!(e.cadence_state.steps.iter().sum::<u64>() >= 8, "{:?}", e.cadence_state);
+        assert!(e.speed > 0.1, "gentle steps stalled: {:?}", e.cadence_state);
+    }
+    #[test]
+    fn acceleration_first_and_orientation_first_produce_same_rhythm() {
+        let mut a = engine(false, IDENTITY); let mut b = engine(false, IDENTITY);
+        for n in 2..600 {
+            let t = n as f64 * 0.01;
+            stride(&mut a, t, 2.2, 25., 0., IDENTITY, true);
+            stride(&mut b, t, 2.2, 25., 0., IDENTITY, false);
+            assert_eq!(a.cadence_state.steps, b.cadence_state.steps);
+            assert!((a.speed - b.speed).abs() < 1e-10);
+        }
+        assert!(a.speed > 0.4);
+    }
+    #[test]
+    fn genuine_running_through_a_turn_retains_normal_speed() {
+        let mut straight = engine(false, IDENTITY); let mut turning = engine(false, IDENTITY);
+        let (mut a, mut b, mut count) = (0., 0., 0.);
+        for n in 2..800 {
+            let t = n as f64 * 0.01;
+            stride(&mut straight, t, 3.2, 30., 0., IDENTITY, false);
+            stride(&mut turning, t, 3.2, 30., t * 2., IDENTITY, false);
+            if t > 3. {
+                assert!(turning.speed > 0.85, "running dropped at {t}: {}", turning.foot_motion_snapshot(t));
+                a += straight.speed; b += turning.speed; count += 1.;
+            }
+        }
+        assert!(b / count > 0.85, "turning run speed {}", b / count);
+        assert!((a - b).abs() / count < 0.08, "straight {} turning {}", a / count, b / count);
+    }
+    #[test]
+    fn walking_to_pivot_stops_without_waiting_for_cadence_timeout() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..400 { let t = n as f64 * 0.01; stride(&mut e, t, 2.2, 25., 0., IDENTITY, false); }
+        assert!(e.speed > 0.3);
+        for n in 400..440 {
+            let t = n as f64 * 0.01;
+            frame(&mut e, t, [0.; 2], (t - 4.) * 4., [4.; 2], IDENTITY, false, false);
+        }
+        assert!(e.pivot_suppressed);
+        assert_eq!(e.speed, 0.);
+        assert!(e.armed && e.calibrated);
+    }
+    #[test]
+    fn settings_update_preserves_active_walk_and_rejects_invalid_values() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..300 { let t = n as f64 * 0.01; stride(&mut e, t, 2.2, 25., 0.4, IDENTITY, false); }
+        let before = (e.speed, e.heading, e.cadence_state, e.steps.clone());
+        let mut settings = e.cfg.foot_motion.clone(); settings.min_swing_degrees = 3.;
+        e.update_foot_motion_settings(settings).unwrap();
+        assert!(e.armed && e.calibrated);
+        assert_eq!((e.speed, e.heading, e.cadence_state, e.steps.clone()), before);
+        let mut invalid = e.cfg.foot_motion.clone(); invalid.pivot_ratio = f64::NAN;
+        assert!(e.update_foot_motion_settings(invalid).is_err());
+    }
 }

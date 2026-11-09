@@ -211,6 +211,9 @@ impl Lab {
             Some("y") => true,
             _ => return Err("heading_axis must be y or z".into()),
         };
+        if let Some(settings) = v.get("foot_motion") {
+            cfg.foot_motion = crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
+        }
         cfg.validate()?;
         let output_mode = match v["output_mode"].as_str() {
             None | Some("meta") => "meta",
@@ -361,6 +364,7 @@ impl Lab {
         }
         let mut v = v;
         v["game_profiles"] = self.game_profiles.clone();
+        v["foot_motion"] = cfg.foot_motion.to_json();
         let tmp = self.config.with_extension("tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
         fs::rename(tmp, &self.config).map_err(|e| e.to_string())?;
@@ -549,7 +553,7 @@ impl Lab {
         }
     }
     fn current_profile(&self) -> Value {
-        json!({"locomotion":{"algorithm":algorithm_name(&self.engine.cfg),"revision":LOCOMOTION_REVISION,"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
+        json!({"foot_motion":self.engine.cfg.foot_motion.to_json(),"locomotion":{"algorithm":algorithm_name(&self.engine.cfg),"revision":LOCOMOTION_REVISION,"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
     }
     fn gesture_input(&self, t: f64) -> crate::gestures::Input {
         let source = |i: usize| {
@@ -585,6 +589,9 @@ impl Lab {
     fn load_profile_settings(&mut self,v:&Value)->Result<(),String>{self.load_profile_settings_inner(v,false)}
     fn load_profile_settings_inner(&mut self, v: &Value, preserve_chest:bool) -> Result<(), String> {
         let mut cfg = self.engine.cfg.clone();
+        if let Some(settings) = v.get("foot_motion") {
+            cfg.foot_motion = crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
+        }
         if let Some(l) = v.get("locomotion") {
             if l["algorithm"].is_null() {return Err("Invalid profile algorithm".into());}
             set_algorithm(&mut cfg, l["algorithm"].as_str()).map_err(|_| "Invalid profile algorithm".to_string())?;
@@ -675,6 +682,29 @@ impl Lab {
         Ok(())
     }
     pub fn command(&mut self, v: &Value, t: f64) -> Result<(), String> {
+        // This command intentionally bypasses the general command preamble: even
+        // refreshing held poses can change movement state on a rejected update.
+        if v["command"] == "foot_motion_settings" {
+            if self.feet_learning.is_some() || self.sensor_calibration.is_some()
+                || self.walking_learning.is_some() || self.jump_learning.is_some() || self.crouch_learning.is_some() {
+                return Err("Finish or cancel calibration before changing live foot motion settings".into());
+            }
+            let object = v.as_object().ok_or("Invalid foot motion command")?;
+            if object.keys().any(|key| !matches!(key.as_str(), "command" | "settings")) {
+                return Err("Foot motion command accepts only settings".into());
+            }
+            let settings = crate::foot_motion::Settings::from_json(v.get("settings").ok_or("Missing settings")?)
+                .map_err(str::to_owned)?;
+            if v["settings"].as_object().is_none_or(|o| o.len() != 3) {
+                return Err("Live foot motion update requires all three settings".into());
+            }
+            let mut cfg = self.engine.cfg.clone();
+            cfg.foot_motion = settings.clone();
+            cfg.validate().map_err(str::to_owned)?;
+            // Commit to disk first. Failure leaves the complete live session intact.
+            self.save(&self.mapping, &cfg, &self.output_mode)?;
+            return self.engine.update_foot_motion_settings(settings).map_err(str::to_owned);
+        }
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
@@ -1136,6 +1166,9 @@ impl Lab {
                     .get("settings")
                     .and_then(Value::as_object)
                     .ok_or("Missing profile settings")?;
+                if let Some(settings) = profile_settings.get("foot_motion") {
+                    crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
+                }
                 if let Some(g) = profile_settings.get("gestures") {
                     crate::gestures::Settings::from_json(g).map_err(str::to_owned)?;
                 }
@@ -1958,6 +1991,7 @@ impl Lab {
         result["device_calibrations"]=json!(self.device_mountings);
         result["mounting_calibration"] = json!({"valid":self.mounting_valid(t),"tracker_identity":self.current_mounting_identity(t),"learned_identity":self.learned_mounting_identity,"mapping":self.learned_mounting_identity.as_ref().and_then(|id|self.device_mountings.get(id)),"message":if self.mounting_valid(t) {""} else {"Sensor calibration required for this chest tracker"}});
         result["game_profiles"] = self.game_profiles.clone();
+        result["foot_motion"] = self.engine.foot_motion_snapshot(t);
         result["steamvr"]["ack_age_ms"] = if self.ack_seen>=0. && t>=self.ack_seen {json!((t-self.ack_seen)*1000.)}else{Value::Null};
         result["steamvr"]["neutral_handshake_pending"] = json!(self.neutral_pending);
         result["hmd_pose"]=json!({"fresh":hmd.is_some(),"height":hmd.map(|h|h.height),"sample_time":hmd.map(|h|h.seen),"sequence":if hmd.is_some(){self.v2_sequence}else{None}});
@@ -1967,6 +2001,86 @@ impl Lab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn foot_motion_fixture() -> (PathBuf, Lab) {
+        let dir = std::env::temp_dir().join(format!("foot-live-{}-{}", std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut lab = Lab::new(dir.join("config.json")).unwrap();
+        lab.engine.cfg.continuous = false; lab.engine.cfg.cadence = true;
+        lab.mapping = ["left:0".into(),"right:0".into(),"chest:0".into()];
+        lab.tracker_identities.insert("chest:0".into(),"AA:BB:CC:DD:EE:FF".into());
+        lab.learned_mounting_identity = Some("AA:BB:CC:DD:EE:FF:0".into());
+        lab.device_mountings.insert("AA:BB:CC:DD:EE:FF:0".into(),lab.actions.settings().to_json()["direction"].clone());
+        lab.engine.armed = true; lab.engine.calibrated = true;
+        lab.engine.speed = 0.43; lab.engine.heading = 0.75; lab.heading = 0.75;
+        lab.walking = true; lab.travel_xy = [0.2,0.3]; lab.turn_xy = [0.1,0.]; lab.output_buttons = 2;
+        lab.ack_seen = 1.; lab.ack_flags = 7; lab.neutral_pending = false;
+        lab.save(&lab.mapping,&lab.engine.cfg,&lab.output_mode).unwrap();
+        (dir,lab)
+    }
+    #[test]
+    fn foot_motion_live_save_load_preserves_armed_session_mounting_and_roles() {
+        let (dir,mut lab) = foot_motion_fixture();
+        let generation = lab.generation;
+        let before = lab.snapshot(1.);
+        let old_disk:Value=serde_json::from_slice(&fs::read(&lab.config).unwrap()).unwrap();
+        let settings=json!({"enabled":true,"min_swing_degrees":1.5,"pivot_ratio":2.8});
+        lab.command(&json!({"command":"foot_motion_settings","settings":settings}),1.).unwrap();
+        assert!(lab.engine.armed && lab.engine.calibrated && lab.walking);
+        assert_eq!(lab.engine.speed,0.43); assert_eq!(lab.engine.heading,0.75); assert_eq!(lab.heading,0.75);
+        assert_eq!(lab.generation,generation); assert_eq!(lab.travel_xy,[0.2,0.3]); assert_eq!(lab.turn_xy,[0.1,0.]); assert_eq!(lab.output_buttons,2);
+        assert_eq!(lab.ack_seen,1.); assert_eq!(lab.ack_flags,7); assert!(!lab.neutral_pending);
+        assert_eq!(lab.snapshot(1.)["actions"],before["actions"]);
+        let disk:Value=serde_json::from_slice(&fs::read(&lab.config).unwrap()).unwrap();
+        for key in ["trackers","tracker_identities","mounting_calibration","actions","gestures","locomotion","movement_engine","sensor_layout"] { assert_eq!(disk[key],old_disk[key],"{key}"); }
+        assert_eq!(disk["foot_motion"],settings);
+        assert_eq!(lab.snapshot(1.)["foot_motion"]["settings"],settings);
+        let loaded=Lab::new(lab.config.clone()).unwrap();
+        assert_eq!(loaded.engine.cfg.foot_motion.to_json(),settings);
+        assert!(loaded.engine.cfg.cadence); assert_eq!(loaded.mapping,lab.mapping);
+        assert_eq!(loaded.device_mountings,lab.device_mountings);
+        lab.command(&json!({"command":"profile_save","name":"Foot tuning"}),1.).unwrap();
+        let profile=lab.profile_store().load("Foot tuning").unwrap();
+        assert_eq!(profile["foot_motion"],settings);
+        lab.command(&json!({"command":"foot_motion_settings","settings":{"enabled":false,"min_swing_degrees":3.,"pivot_ratio":4.}}),1.).unwrap();
+        lab.command(&json!({"command":"profile_load","name":"Foot tuning"}),1.).unwrap();
+        assert_eq!(lab.engine.cfg.foot_motion.to_json(),settings);
+        assert_eq!(lab.mapping,["left:0","right:0","chest:0"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn foot_motion_rejected_updates_and_save_failures_preserve_complete_session() {
+        let (dir,mut lab)=foot_motion_fixture();
+        let disk=fs::read(&lab.config).unwrap();
+        let before=lab.snapshot(1.);
+        for settings in [Value::Null,json!({}),json!({"enabled":false}),json!({"enabled":"yes","min_swing_degrees":2.,"pivot_ratio":2.}),json!({"enabled":true,"min_swing_degrees":0.1,"pivot_ratio":2.}),json!({"enabled":true,"min_swing_degrees":2.,"pivot_ratio":6.}),json!({"enabled":true,"min_swing_degrees":2.,"pivot_ratio":2.,"trackers":{}})] {
+            assert!(lab.command(&json!({"command":"foot_motion_settings","settings":settings}),2.).is_err());
+            assert_eq!(lab.snapshot(1.),before); assert_eq!(fs::read(&lab.config).unwrap(),disk);
+        }
+        let settings=json!({"enabled":false,"min_swing_degrees":1.,"pivot_ratio":1.});
+        assert!(lab.command(&json!({"command":"foot_motion_settings","settings":settings,"locomotion":{"algorithm":"continuous"}}),2.).is_err());
+        assert_eq!(lab.snapshot(1.),before);
+        fs::remove_file(&lab.config).unwrap(); fs::create_dir(&lab.config).unwrap();
+        assert!(lab.command(&json!({"command":"foot_motion_settings","settings":settings}),2.).is_err());
+        assert_eq!(lab.snapshot(1.),before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn foot_motion_missing_config_and_profile_fields_preserve_existing_algorithm_and_settings() {
+        let (dir,lab)=foot_motion_fixture();
+        let mut old:Value=serde_json::from_slice(&fs::read(&lab.config).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("foot_motion");
+        old["locomotion"]["algorithm"]=json!("continuous");
+        fs::write(&lab.config,serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut loaded=Lab::new(lab.config.clone()).unwrap();
+        assert!(loaded.engine.cfg.continuous && !loaded.engine.cfg.cadence);
+        assert_eq!(loaded.engine.cfg.foot_motion,crate::foot_motion::Settings::default());
+        loaded.engine.cfg.foot_motion.min_swing_degrees=1.;
+        loaded.load_profile_settings(&json!({"detection":{"threshold":3.}})).unwrap();
+        assert_eq!(loaded.engine.cfg.foot_motion.min_swing_degrees,1.);
+        assert!(loaded.engine.cfg.continuous && !loaded.engine.cfg.cadence);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn restart_releases_unknown_saved_tracker_until_identity_arrives() {
         let mut l=Lab::new(PathBuf::from("nonexistent-handshake-recovery-fixture.json")).unwrap();

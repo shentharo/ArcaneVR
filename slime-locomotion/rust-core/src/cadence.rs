@@ -111,6 +111,20 @@ impl Cadence {
             self.observe(foot, t);
         }
     }
+    /// Replace both activity channels before observing. This prevents a blocked
+    /// pose event from triggering on acceleration left over from an earlier event.
+    pub fn sample(&mut self, foot: usize, tilt: f64, tilt_at: Option<f64>,
+                  accel: f64, accel_at: Option<f64>, t: f64) {
+        if foot >= 2 || !t.is_finite() || !tilt.is_finite() || !accel.is_finite()
+            || tilt_at.is_some_and(|at| !at.is_finite() || at > t)
+            || accel_at.is_some_and(|at| !at.is_finite() || at > t) { return; }
+        let f = &mut self.feet[foot];
+        f.tilt = tilt.max(0.);
+        f.tilt_at = tilt_at;
+        f.accel = accel.max(0.);
+        f.accel_at = accel_at;
+        self.observe(foot, t);
+    }
     fn observe(&mut self, side: usize, t: f64) {
         let f = &mut self.feet[side];
         let activity = f.activity(t);

@@ -72,6 +72,7 @@ impl ProfileStore {
             "sensor_layout",
             "step_input",
             "locomotion",
+            "foot_motion",
             "actions",
             "gestures",
             "movement_engine",
@@ -81,6 +82,9 @@ impl ProfileStore {
         ];
         if object.is_empty() || object.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
             return Err("settings may contain only locomotion, actions, movement_engine, detection and output mode".into());
+        }
+        if let Some(settings)=object.get("foot_motion") {
+            crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
         }
         if let Some(source)=object.get("step_input") {if !matches!(source.as_str(),Some("off"|"chest"|"feet")){return Err("invalid profile step_input".into());}}
         if let Some(layout)=object.get("sensor_layout") {
@@ -321,5 +325,23 @@ mod tests {
         let huge = json!({ "locomotion": "x".repeat(1024 * 1024) });
         assert!(store.save("Too big", "", huge).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod foot_motion_tests {
+    use super::*;
+    #[test]
+    fn foot_motion_profile_roundtrip_and_strict_identity_rejection() {
+        let dir=std::env::temp_dir().join(format!("foot-profile-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap(); let store=ProfileStore::new(dir.clone());
+        let settings=json!({"foot_motion":{"enabled":false,"min_swing_degrees":1.,"pivot_ratio":3.}});
+        store.save("Foot tuning","",settings.clone()).unwrap();
+        assert_eq!(store.load("Foot tuning").unwrap(),settings);
+        for invalid in [json!({"foot_motion":{"trackers":{"left":"private-id"}}}),json!({"foot_motion":{"enabled":true,"min_swing_degrees":9.}}),json!({"foot_motion":null}),json!({"foot_motion":{"credentials":"private"}})] {
+            assert!(store.save("Rejected","",invalid).is_err());
+        }
+        assert_eq!(store.list().unwrap().len(),1);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

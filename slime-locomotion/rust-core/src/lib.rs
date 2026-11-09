@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod continuous;
 pub mod cadence;
 pub mod gait;
+pub mod foot_motion;
 pub mod gestures;
 pub mod lab;
 pub mod mounting;
