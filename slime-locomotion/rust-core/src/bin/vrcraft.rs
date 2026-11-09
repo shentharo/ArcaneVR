@@ -320,17 +320,31 @@ impl eframe::App for ArcaneVR {
         #[cfg(windows)]
         apply_rounded_window(ctx, frame);
         ctx.request_repaint_after(Duration::from_millis(80));
-        qa_capture::update(ctx);
+        qa_capture::update_embedded(ctx,self.bevy_room.qa_embedded_ready() && self.bevy_room.qa_controls_complete());
         let skinned_home = self.page == pages::Page::Home;
         if qa_capture::path().is_none(){self.overlays.poll();}
         self.bevy_room.poll();
         if self.bevy_room.poll_qa_controls(){self.page=pages::Page::TestRoom;}
         if std::env::var_os("ARCANEVR_EMBED_QA_NAVIGATE").is_some() && qa_capture::path().is_some() {
-            match ctx.cumulative_frame_nr() {
-                60=>ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.,900.))),
-                80=>self.page=pages::Page::Main,
-                110=>self.page=pages::Page::TestRoom,
-                _=>{},
+            // QA-only: GPU startup and native parenting are asynchronous. Begin
+            // timing from a shown child instead of assuming a frame rate.
+            let key=egui::Id::new("embed qa navigation");
+            let mut timing=ctx.data(|d|d.get_temp::<(Instant,u8)>(key));
+            if timing.is_none() && self.bevy_room.qa_embedded_ready(){timing=Some((Instant::now(),0));}
+            if let Some((mut started,mut stage))=timing {
+                let elapsed=started.elapsed().as_secs_f32();
+                match stage {
+                    0 if elapsed>=0.5=>{ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.,900.)));started=Instant::now();stage=1;},
+                    // Allow half a second after the actual resize request even
+                    // if a slow frame missed an earlier nominal deadline.
+                    1 if elapsed>=0.5=>{self.page=pages::Page::Main;stage=2;},
+                    2 if elapsed>=1.5=>{self.page=pages::Page::TestRoom;stage=3;},
+                    3 if elapsed>=2.5 && self.bevy_room.qa_embedded_ready()=>{
+                        ctx.data_mut(|d|d.insert_temp(egui::Id::new("embed qa navigation complete"),true));stage=4;
+                    },
+                    _=>{},
+                }
+                ctx.data_mut(|d|d.insert_temp(key,(started,stage)));
             }
         }
         self.bevy_room.set_page_visible(

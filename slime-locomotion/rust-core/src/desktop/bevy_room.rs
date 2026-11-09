@@ -23,6 +23,13 @@ pub struct BevyRoom {
     #[cfg(windows)] parent_window: Option<isize>,
 }
 impl BevyRoom {
+    pub fn qa_embedded_ready(&self) -> bool {
+        #[cfg(windows)] { self.window.is_some() && self.shown }
+        #[cfg(not(windows))] { false }
+    }
+    pub fn qa_controls_complete(&self) -> bool {
+        std::env::var_os("ARCANEVR_EMBED_QA_CONTROLS").is_none() || self.qa_controls_stage >= 6
+    }
     pub fn sensor_calibration_open(&self) -> bool { self.sensor_calibration.open || self.calibration_mode!=0 }
     pub fn start_sensor_calibration(&mut self, _state: &Value) {
         self.retire_viewer();
