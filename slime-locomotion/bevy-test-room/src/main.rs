@@ -798,12 +798,13 @@ fn exit_checks(
     ground: Query<&Transform,(With<Ground>,Without<Avatar>)>,
     clips: Option<Res<Clips>>,
     stride: Res<StrideTelemetry>,
+    foot_rig: Res<FootRigResource>,
 ) {
     let finishing=launch.quit.load(Ordering::Relaxed)||room.seconds.is_some_and(|s|room.started.elapsed().as_secs_f32()>=s-0.1);
     let elapsed=room.started.elapsed().as_secs_f32();
     if let Some(path)=launch.series.clone() {if elapsed-launch.last_series>=0.1 {
         if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _=writeln!(file,"{}",serde_json::json!({"position":[avatar.single().translation.x,avatar.single().translation.y,avatar.single().translation.z],"speed_mps":room.speed,"paused":room.paused,"distance_m":room.distance,"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
+            let _=writeln!(file,"{}",serde_json::json!({"position":[avatar.single().translation.x,avatar.single().translation.y,avatar.single().translation.z],"speed_mps":room.speed,"paused":room.paused,"distance_m":room.distance,"elapsed":elapsed,"stamp":room.last_stamp,"foot_pose":room.foot_pose,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_calibration_epoch":foot_rig.0.calibration_epoch(),"foot_running":room.foot_running,"bones":stride.bones,"reason":room.reason,"clip":room.clip}));
         }
         if (3. ..=13.).contains(&elapsed) {
             if let Some(dir)=std::env::var_os("ARCANEVR_QA_FILM_DIR") {
@@ -819,7 +820,7 @@ fn exit_checks(
         if let Some(path)=&launch.report {
             let pos=avatar.single().translation;
             let fixed_ground=ground.iter().all(|g|g.translation==Vec3::ZERO);
-            let value=serde_json::json!({"position":[pos.x,pos.y,pos.z],"speed_mps":room.speed,"max_walk_speed":room.max_walk_speed,"max_sprint_speed":room.max_sprint_speed,"local_input":[room.local.x,room.local.y],"body_lean":[room.body_lean.x,room.body_lean.y],"foot_pose":room.foot_pose,"foot_pose_max":room.foot_pose_max,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_running":room.foot_running,"lean_min":[room.lean_min.x,room.lean_min.y],"lean_max":[room.lean_max.x,room.lean_max.y],"distance_m":room.distance,"rotation_degrees":room.spin.to_degrees(),"facing_degrees":room.yaw.to_degrees(),"virtual_turn_degrees":room.virtual_turn.to_degrees(),"live_frames":room.live_frames,"animations_seen":room.animations_seen,"clips_seen":room.clips_seen,"clip":room.clip,"clip_speed":room.clip_speed,"fixed_ground":fixed_ground,"reason":room.reason,"character_loaded":clips.is_some(),"calibration_preview":launch.calibration,"procedural_strafe":{"active":stride.active,"bones":stride.bones,"left":stride.left,"right":stride.right,"lean":stride.lean,"residual_offsets":stride.residual}});
+            let value=serde_json::json!({"position":[pos.x,pos.y,pos.z],"speed_mps":room.speed,"max_walk_speed":room.max_walk_speed,"max_sprint_speed":room.max_sprint_speed,"local_input":[room.local.x,room.local.y],"body_lean":[room.body_lean.x,room.body_lean.y],"foot_pose":room.foot_pose,"foot_pose_max":room.foot_pose_max,"foot_direct":room.foot_direct,"foot_profiles":room.foot_profiles,"foot_calibration_epoch":foot_rig.0.calibration_epoch(),"foot_running":room.foot_running,"lean_min":[room.lean_min.x,room.lean_min.y],"lean_max":[room.lean_max.x,room.lean_max.y],"distance_m":room.distance,"rotation_degrees":room.spin.to_degrees(),"facing_degrees":room.yaw.to_degrees(),"virtual_turn_degrees":room.virtual_turn.to_degrees(),"live_frames":room.live_frames,"animations_seen":room.animations_seen,"clips_seen":room.clips_seen,"clip":room.clip,"clip_speed":room.clip_speed,"fixed_ground":fixed_ground,"reason":room.reason,"character_loaded":clips.is_some(),"calibration_preview":launch.calibration,"procedural_strafe":{"active":stride.active,"bones":stride.bones,"left":stride.left,"right":stride.right,"lean":stride.lean,"residual_offsets":stride.residual}});
             let _=std::fs::write(path,serde_json::to_vec_pretty(&value).unwrap());
         }
         launch.reported=true;

@@ -9,7 +9,7 @@ struct Reference { axis:Vec3, range:f32 }
 #[derive(Default)]
 struct Foot { neutral:Option<Quat>, height:f32, mac:String, active:bool, settled:f32, energy:f32, peak:f32, peak_at:f32, last_peak:Option<f32>, period:Option<f32> }
 #[derive(Default)]
-pub struct FootRig { feet:[Foot;2], profiles:HashMap<String,Reference>, quiet:f32, had_motion:bool, clock:f32, last_motion:[Option<f32>;2], initial_settled:bool, initial_quiet:f32, running:bool, last_walk_signal:Option<f32>, last_step:Option<(usize,f32)>, step_interval:Option<f32> }
+pub struct FootRig { feet:[Foot;2], profiles:HashMap<String,Reference>, quiet:f32, had_motion:bool, clock:f32, last_motion:[Option<f32>;2], initial_settled:bool, initial_quiet:f32, running:bool, last_walk_signal:Option<f32>, last_step:Option<(usize,f32)>, step_interval:Option<f32>, calibration_epoch:Option<u64> }
 fn quaternion(v:&Value)->Option<Quat> {
  let a=v.as_array()?;if a.len()!=4{return None;}
  let q=Quat::from_xyzw(a[1].as_f64()? as f32,a[2].as_f64()? as f32,a[3].as_f64()? as f32,a[0].as_f64()? as f32);
@@ -22,6 +22,12 @@ fn rotation_vector(from:Quat,to:Quat)->Vec3 {
 impl FootRig {
  pub fn profile_count(&self)->usize {self.profiles.len()}
  pub fn running(&self)->bool {self.running}
+ pub fn calibration_epoch(&self)->Option<u64> {self.calibration_epoch}
+ /// Reset session foot neutral/animation state, keeping learned mounting axes and ranges.
+ pub fn recenter(&mut self) {
+  let profiles=std::mem::take(&mut self.profiles);let calibration_epoch=self.calibration_epoch;
+  *self=Self {profiles,calibration_epoch,..Self::default()};
+ }
  pub fn load(dir:&Path)->Self {
   let mut rig=Self::default();
   let Ok(entries)=std::fs::read_dir(dir) else{return rig;};
@@ -45,6 +51,10 @@ impl FootRig {
   rig
  }
  pub fn update(&mut self,v:&Value,dt:f32)->([f32;2],bool) {
+  if let Some(epoch)=v["calibration_epoch"].as_u64() {
+   if self.calibration_epoch.is_some_and(|previous|previous!=epoch) {self.recenter();}
+   self.calibration_epoch=Some(epoch);
+  }
   let dt=dt.clamp(0.,0.1);self.clock+=dt;let heading=v["heading"].as_f64().filter(|x|x.is_finite()).unwrap_or(0.) as f32;
   let up=if v["axis"]=="y" {Vec3::Y}else{Vec3::Z};let unyaw=Quat::from_axis_angle(up,-heading);
   let mut valid=true;let mut quiet=true;let mut targets=[0.;2];let mut events=Vec::new();
@@ -110,6 +120,16 @@ impl FootRig {
  fn sample(left:f32,right:f32)->Value {let q=|a:f32|json!([(a/2.).cos(),(a/2.).sin(),0.,0.]);json!({"axis":"z","heading":0.,"locomotion":{"preview":{"speed":0.}},"roles":{"left":{"fresh":true,"mac":"L","quaternion":q(left),"acceleration_magnitude":1.},"right":{"fresh":true,"mac":"R","quaternion":q(right),"acceleration_magnitude":1.}}})}
  #[test] fn feet_move_independently_and_return_to_neutral(){let mut r=FootRig::default();r.update(&sample(0.,0.),0.1);let (p,_)=r.update(&sample(0.2,0.),0.1);assert!(p[0]>0.5 && p[1]<0.01);let (p,_)=r.update(&sample(0.,0.2),0.1);assert!(p[1]>0.5 && p[0]<0.25);for _ in 0..8{r.update(&sample(0.,0.),0.1);}let (p,_)=r.update(&sample(0.,0.),0.1);assert!(p[0]<0.01 && p[1]<0.01);}
  #[test] fn stale_foot_is_not_animated(){let mut r=FootRig::default();r.update(&sample(0.,0.),0.1);let mut v=sample(0.2,0.);v["roles"]["left"]["fresh"]=json!(false);let (p,valid)=r.update(&v,0.1);assert!(!valid);assert_eq!(p[0],0.);}
+ #[test] fn successful_calibration_epoch_recenters_both_feet_and_keeps_profiles(){
+  let mut rig=FootRig::default();rig.profiles.insert("L".into(),Reference{axis:Vec3::X,range:0.25});
+  let mut v=sample(0.,0.);v["calibration_epoch"]=json!(1);rig.update(&v,0.1);
+  v=sample(0.2,0.3);v["calibration_epoch"]=json!(1);let (poses,_)=rig.update(&v,0.1);assert!(poses[0]>0.1&&poses[1]>0.1);
+  // Transport generations alone must not discard the current foot pose.
+  v["steamvr"]=json!({"generation":99});let (poses,_)=rig.update(&v,0.1);assert!(poses[0]>0.1&&poses[1]>0.1);
+  v["calibration_epoch"]=json!(2);let (poses,valid)=rig.update(&v,0.1);
+  assert!(valid);assert!(poses.iter().all(|pose|pose.abs()<0.001));assert_eq!(rig.profile_count(),1);
+  assert_eq!(rig.calibration_epoch(),Some(2));assert!(!rig.running());
+ }
  #[test] fn turning_the_body_does_not_lift_the_feet(){let mut r=FootRig::default();r.update(&sample(0.,0.),0.1);let yaw=Quat::from_rotation_z(1.2);let q=json!([yaw.w,yaw.x,yaw.y,yaw.z]);let mut v=sample(0.,0.);v["heading"]=json!(1.2);v["roles"]["left"]["quaternion"]=q.clone();v["roles"]["right"]["quaternion"]=q;let (p,_)=r.update(&v,0.1);assert!(p[0]<0.01 && p[1]<0.01);}
  #[test] fn turning_chest_while_feet_remain_planted_does_not_lift_them(){let mut r=FootRig::default();r.update(&sample(0.,0.),0.1);let mut v=sample(0.,0.);v["heading"]=json!(1.2);let (p,_)=r.update(&v,0.1);assert!(p[0]<0.01 && p[1]<0.01);}
  #[test] fn holding_one_lift_does_not_recenter_it(){let mut r=FootRig::default();let mut neutral=sample(0.,0.);neutral["roles"]["left"]["acceleration_magnitude"]=json!(0.1);neutral["roles"]["right"]["acceleration_magnitude"]=json!(0.1);for _ in 0..6{r.update(&neutral,0.1);}let mut v=sample(0.2,0.);v["roles"]["left"]["acceleration_magnitude"]=json!(0.1);v["roles"]["right"]["acceleration_magnitude"]=json!(0.1);for _ in 0..30{r.update(&v,0.1);}let (p,_)=r.update(&v,0.1);assert!(p[0]>0.5 && p[1]<0.01);}

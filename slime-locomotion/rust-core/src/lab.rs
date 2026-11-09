@@ -54,6 +54,13 @@ struct Acceleration {
     seen: f64,
     count: u64,
 }
+struct HeadRecenterResume {
+    generation: u32,
+    started: f64,
+    pose: crate::head_recenter::Input,
+    head: crate::actions::TimedHmd,
+    last_head: crate::actions::TimedHmd,
+}
 pub struct Lab {
     pub gestures: crate::gestures::GestureProcessor,
     pub gesture_preview: crate::gestures::Telemetry,
@@ -117,6 +124,12 @@ pub struct Lab {
     pub heading: f64,
     pub output_mode: String,
     pub generation: u32,
+    pub calibration_epoch: u64,
+    head_recenter: crate::head_recenter::Detector,
+    head_recenter_resume: Option<HeadRecenterResume>,
+    head_recenter_resume_result: String,
+    head_recenter_hmd_seen: Option<f64>,
+    head_recenter_accel_baseline: [Option<[f64;3]>;2],
     pub steam_port: u16,
     pub steam_sequence: u32,
     pub steam_packets_sent: u64,
@@ -231,6 +244,12 @@ impl Lab {
             thighs:[v["sensor_layout"]["thighs"][0].as_str().unwrap_or("").into(),v["sensor_layout"]["thighs"][1].as_str().unwrap_or("").into()],
             movement_engine,
             hmd: None,
+            calibration_epoch: 0,
+            head_recenter: crate::head_recenter::Detector::new(v.get("head_recenter").map(crate::head_recenter::Settings::from_json).transpose().map_err(str::to_owned)?.unwrap_or_default()).map_err(str::to_owned)?,
+            head_recenter_resume: None,
+            head_recenter_resume_result: String::new(),
+            head_recenter_hmd_seen: None,
+            head_recenter_accel_baseline: [None;2],
             protocol_v2: false,
             v2_sequence: None,
             travel_xy: [0.; 2],
@@ -317,6 +336,9 @@ impl Lab {
         self.new_generation();
     }
     fn new_generation(&mut self) {
+        self.cancel_head_recenter_resume("Session changed; automatic resume cancelled");
+        self.head_recenter.reset();
+        self.head_recenter_accel_baseline=[None;2];
         self.gestures.reset();
         self.gesture_preview = Default::default();
         self.travel_xy = [0.; 2];
@@ -358,6 +380,9 @@ impl Lab {
         self.save_options_count(mapping,cfg,output_mode,actions,gestures,movement_engine,if movement_engine=="body_tilt" || cfg.chest_steps {1}else{self.sensor_count.max(3)})
     }
     fn save_options_count(&self,mapping:&[String;3],cfg:&Detection,output_mode:&str,actions:&crate::actions::Settings,gestures:&crate::gestures::Settings,movement_engine:&str,sensor_count:u8)->Result<(),String> {
+        self.save_options_count_head(mapping,cfg,output_mode,actions,gestures,movement_engine,sensor_count,self.head_recenter.settings())
+    }
+    fn save_options_count_head(&self,mapping:&[String;3],cfg:&Detection,output_mode:&str,actions:&crate::actions::Settings,gestures:&crate::gestures::Settings,movement_engine:&str,sensor_count:u8,head_recenter:&crate::head_recenter::Settings)->Result<(),String> {
         let v = json!({"walking_model":self.walking_model,"auto_add":self.auto_add,"tracker_identities":self.tracker_identities,"mounting_calibration":{"learned_identity":self.learned_mounting_identity,"devices":self.device_mountings},"sensor_layout":{"count":sensor_count,"thighs":self.thighs},"actions":actions.to_json(),"gestures":gestures.to_json(),"movement_engine":movement_engine,"step_input":if cfg.chest_steps {"chest"} else if movement_engine=="body_tilt" {"off"} else {"feet"},"locomotion":{"algorithm":algorithm_name(cfg),"revision":LOCOMOTION_REVISION,"settings":cfg.motion.to_json()},"output_mode":output_mode,"trackers":{"left":mapping[0],"right":mapping[1],"torso":mapping[2]},"detection":{"acceleration_mode":if cfg.accel_has_gravity {"gravity-baseline"} else {"linear"},"threshold":cfg.threshold,"release":cfg.release,"stale":cfg.stale,"stop_after":cfg.stop_after,"heading_axis":if cfg.y_up{"y"}else{"z"},"heading_sign":cfg.sign}});
         if let Some(parent) = self.config.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -365,6 +390,7 @@ impl Lab {
         let mut v = v;
         v["game_profiles"] = self.game_profiles.clone();
         v["foot_motion"] = cfg.foot_motion.to_json();
+        v["head_recenter"] = head_recenter.to_json();
         let tmp = self.config.with_extension("tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
         fs::rename(tmp, &self.config).map_err(|e| e.to_string())?;
@@ -553,7 +579,7 @@ impl Lab {
         }
     }
     fn current_profile(&self) -> Value {
-        json!({"foot_motion":self.engine.cfg.foot_motion.to_json(),"locomotion":{"algorithm":algorithm_name(&self.engine.cfg),"revision":LOCOMOTION_REVISION,"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
+        json!({"head_recenter":self.head_recenter.settings().to_json(),"foot_motion":self.engine.cfg.foot_motion.to_json(),"locomotion":{"algorithm":algorithm_name(&self.engine.cfg),"revision":LOCOMOTION_REVISION,"settings":self.engine.cfg.motion.to_json()},"actions":self.actions.settings().to_json(),"gestures":self.gestures.settings().to_json(),"movement_engine":self.movement_engine,"step_input":if self.engine.cfg.chest_steps {"chest"}else if self.movement_engine=="body_tilt" {"off"}else{"feet"},"detection":{"heading_axis":if self.engine.cfg.y_up {"y"} else {"z"},"threshold":self.engine.cfg.threshold,"acceleration_mode":if self.engine.cfg.accel_has_gravity {"gravity-baseline"} else {"linear"}},"output_mode":self.output_mode,"sensor_layout":{"count":self.layout_count()}})
     }
     fn gesture_input(&self, t: f64) -> crate::gestures::Input {
         let source = |i: usize| {
@@ -588,6 +614,7 @@ impl Lab {
     }
     fn load_profile_settings(&mut self,v:&Value)->Result<(),String>{self.load_profile_settings_inner(v,false)}
     fn load_profile_settings_inner(&mut self, v: &Value, preserve_chest:bool) -> Result<(), String> {
+        let head_recenter = v.get("head_recenter").map(crate::head_recenter::Settings::from_json).transpose().map_err(str::to_owned)?.unwrap_or_else(||self.head_recenter.settings().clone());
         let mut cfg = self.engine.cfg.clone();
         if let Some(settings) = v.get("foot_motion") {
             cfg.foot_motion = crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
@@ -668,7 +695,8 @@ impl Lab {
         if !["meta", "steamvr"].contains(&output) {
             return Err("Invalid output mode".into());
         }
-        self.save_options_count(&self.mapping, &cfg, output, &actions, &gestures, mode, count)?;
+        self.save_options_count_head(&self.mapping, &cfg, output, &actions, &gestures, mode, count, &head_recenter)?;
+        self.head_recenter.set_settings(head_recenter).map_err(str::to_owned)?;
         self.gestures = crate::gestures::GestureProcessor::new(gestures).map_err(str::to_owned)?;
         let preserve=preserve_chest && !self.engine.cfg.require_steps && !cfg.require_steps && self.engine.cfg.y_up==cfg.y_up && self.engine.cfg.sign==cfg.sign;
         if preserve {self.engine.reconfigure_chest_preserving_center(cfg).map_err(str::to_owned)?;self.actions.update_settings_preserving_center(actions).map_err(str::to_owned)?;}
@@ -682,6 +710,18 @@ impl Lab {
         Ok(())
     }
     pub fn command(&mut self, v: &Value, t: f64) -> Result<(), String> {
+        if v["command"] == "head_recenter_settings" {
+            let object=v.as_object().ok_or("Invalid head recenter command")?;
+            if object.len()!=2 || object.keys().any(|key| !matches!(key.as_str(),"command"|"settings")) {return Err("Head recenter command accepts only settings".into());}
+            if v["settings"].as_object().is_none_or(|o|o.len()!=1 || !o.contains_key("enabled")) {return Err("Head recenter update requires enabled".into());}
+            let settings=crate::head_recenter::Settings::from_json(v.get("settings").ok_or("Missing settings")?).map_err(str::to_owned)?;
+            self.save_options_count_head(&self.mapping,&self.engine.cfg,&self.output_mode,self.actions.settings(),self.gestures.settings(),&self.movement_engine,self.layout_count(),&settings)?;
+            self.cancel_head_recenter_resume("Head recenter setting changed; automatic resume cancelled");
+            self.head_recenter.set_settings(settings).map_err(str::to_owned)?;
+            self.head_recenter_hmd_seen=self.hmd.map(|h|h.seen);
+            self.head_recenter_accel_baseline=[None;2];
+            return Ok(());
+        }
         // This command intentionally bypasses the general command preamble: even
         // refreshing held poses can change movement state on a rejected update.
         if v["command"] == "foot_motion_settings" {
@@ -703,6 +743,8 @@ impl Lab {
             cfg.validate().map_err(str::to_owned)?;
             // Commit to disk first. Failure leaves the complete live session intact.
             self.save(&self.mapping, &cfg, &self.output_mode)?;
+            self.cancel_head_recenter_resume("Foot settings changed; automatic resume cancelled");
+            self.head_recenter.reset();self.head_recenter_accel_baseline=[None;2];
             return self.engine.update_foot_motion_settings(settings).map_err(str::to_owned);
         }
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
@@ -710,6 +752,8 @@ impl Lab {
         self.actions.set_world_up(if self.engine.cfg.y_up {[0.,1.,0.]} else {[0.,0.,1.]});
         self.refresh_held_poses(t);
         let command = v["command"].as_str().ok_or("Missing command")?;
+        self.cancel_head_recenter_resume("Command received; automatic resume cancelled");
+        self.head_recenter.reset();self.head_recenter_accel_baseline=[None;2];
         if self.feet_learning.is_some() && !matches!(command,"feet_learn_cancel"|"feet_learn_confirm"|"stop") {return Err("Finish or cancel feet calibration first".into());}
         if self.crouch_learning.is_some() && !matches!(command, "crouch_learn_cancel" | "stop") { return Err("Finish or cancel crouch learning first".into()); }
         if self.walking_learning.is_some() && !matches!(command,"walking_learn_cancel"|"stop") {return Err("Finish or cancel walking learning first".into());}
@@ -819,6 +863,7 @@ impl Lab {
                     self.engine.calibrated = false;
                     return Err(e.into());
                 }
+                self.calibration_epoch=self.calibration_epoch.wrapping_add(1);
             }
             "arm" => {
                 if !self.thighs_ready(t){return Err("Waiting for both thigh trackers".into());}
@@ -1645,6 +1690,7 @@ impl Lab {
             self.stop_detail = detail.unwrap_or(Value::Null);
         }
         if self.engine.armed&&!self.thighs_ready(t){self.engine.disarm();self.stop_reason="Thigh tracker signal expired".into();}
+        self.tick_head_recenter(t);
         let input = self.action_input(t);
         self.actions.set_walking_forward_gain(if self.engine.cfg.chest_steps {Some(self.walking_speed)}else{None});
         self.actions.set_walking_sway(self.engine.cfg.chest_steps && self.walking_model.is_object() && self.walking_speed>0.);
@@ -1744,10 +1790,99 @@ impl Lab {
         });
         self.accelerations.retain(|_, a| t - a.seen < 600.);
     }
+    fn cancel_head_recenter_resume(&mut self, reason:&str) {
+        if self.head_recenter_resume.take().is_some() {
+            // Completing a recenter already disarmed output. Cancellation must
+            // never revive an earlier armed state.
+            self.engine.disarm();
+            self.head_recenter_resume_result=reason.into();
+        }
+    }
+    fn head_recenter_input(&mut self,t:f64)->crate::head_recenter::Input {
+        let fresh_rotation=|i| self.validated_rotation(i,t).filter(|q|t.is_finite() && q.seen.is_finite() && t>=q.seen && t-q.seen<self.engine.cfg.stale.min(0.25)).map(|q|q.value);
+        let chest=fresh_rotation(2);
+        let feet=std::array::from_fn(|i|if self.mapping[i].is_empty(){None}else{fresh_rotation(i)});
+        let foot_accel=std::array::from_fn(|i| {
+            if self.mapping[i].is_empty(){return None;}
+            self.accelerations.get(&self.mapping[i]).filter(|a|t>=a.seen && t-a.seen<self.engine.cfg.stale.min(0.25) && a.vector.iter().all(|v|v.is_finite())).map(|a| {
+                let baseline=if self.engine.cfg.accel_has_gravity {*self.head_recenter_accel_baseline[i].get_or_insert(a.vector)}else{[0.;3]};
+                a.vector.iter().zip(baseline).map(|(v,b)|(v-b).powi(2)).sum::<f64>().sqrt()
+            })
+        });
+        let assigned_ready=(0..2).all(|i|self.mapping[i].is_empty() || (feet[i].is_some() && foot_accel[i].is_some()));
+        let ready=!self.demo && self.output_mode=="steamvr" && self.protocol_v2 && chest.is_some() && assigned_ready && self.thighs_ready(t)
+            && self.feet_learning.is_none() && self.sensor_calibration.is_none() && self.walking_learning.is_none() && self.jump_learning.is_none() && self.crouch_learning.is_none();
+        crate::head_recenter::Input {t,hmd:self.hmd.map(|h|(h.yaw,h.seen)),chest,feet,foot_accel,y_up:self.engine.cfg.y_up,ready}
+    }
+    fn head_recenter_resume_still(&self,origin:&HeadRecenterResume,input:&crate::head_recenter::Input,t:f64)->bool {
+        let close=|a:Q,b:Q,degrees:f64| {
+            let aa=a.iter().map(|x|x*x).sum::<f64>().sqrt();let bb=b.iter().map(|x|x*x).sum::<f64>().sqrt();
+            let dot=a.iter().zip(b).map(|(x,y)|x*y).sum::<f64>().abs()/(aa*bb);
+            dot.is_finite() && 2.*dot.clamp(0.,1.).acos()<=degrees.to_radians()
+        };
+        let wrap=|x:f64|(x+std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)-std::f64::consts::PI;
+        let Some(h)=self.hmd.filter(|h| t>=h.seen && t-h.seen<=0.25 && [h.height,h.yaw,h.pitch,h.roll,h.seen].iter().all(|v|v.is_finite())) else{return false};
+        let dt=h.seen-origin.last_head.seen;
+        let steady=dt>=0. && (dt==0. || [wrap(h.yaw-origin.last_head.yaw),wrap(h.pitch-origin.last_head.pitch),wrap(h.roll-origin.last_head.roll)].iter().all(|delta|delta.abs()/dt<=15f64.to_radians()));
+        input.ready && steady && wrap(h.yaw-origin.head.yaw).abs()<=5f64.to_radians() && wrap(h.pitch-origin.head.pitch).abs()<=5f64.to_radians() && wrap(h.roll-origin.head.roll).abs()<=5f64.to_radians()
+            && (h.height-origin.head.height).abs()<=0.04
+            && input.chest.zip(origin.pose.chest).is_some_and(|(q,base)|close(q,base,5.))
+            && (0..2).all(|i|match (input.feet[i],origin.pose.feet[i]) {
+                (Some(q),Some(base))=>close(q,base,4.) && input.foot_accel[i].is_some_and(|a|a.is_finite() && a<=0.8),
+                (None,None)=>true,_=>false
+            })
+    }
+    fn tick_head_recenter(&mut self,t:f64) {
+        if !self.head_recenter.settings().enabled {return;}
+        let mut input=self.head_recenter_input(t);
+        if let Some(mut pending)=self.head_recenter_resume.take() {
+            let reason=if pending.generation!=self.generation {Some("Session changed; automatic resume cancelled")}
+                else if t<pending.started || t-pending.started>3. {Some("Automatic resume timed out; start movement when ready")}
+                else if !self.engine.calibrated || !self.head_recenter_resume_still(&pending,&input,t) {Some("Movement or tracking changed; automatic resume cancelled")}
+                else if self.ack_sequence.is_some() && !self.driver_ready(t) {Some("Driver is not ready; automatic resume cancelled")}
+                else {None};
+            if let Some(reason)=reason {self.engine.disarm();self.head_recenter_resume_result=reason.into();self.head_recenter.reset();return;}
+            if self.driver_ready(t) && self.ack_sequence.is_some() && !self.neutral_pending {
+                // Take pending before invoking the normal checks. The public
+                // command preamble cancels an external request's pending resume.
+                match self.command(&json!({"command":"arm"}),t) {
+                    Ok(())=>self.head_recenter_resume_result="Movement resumed after recenter".into(),
+                    Err(error)=>{self.engine.disarm();self.head_recenter_resume_result=format!("Recentered; start movement when ready: {error}");}
+                }
+            }else {if let Some(head)=self.hmd {pending.last_head=head;}self.head_recenter_resume=Some(pending);}
+            return;
+        }
+        input.ready &= self.driver_ready(t);
+        let head_seen=input.hmd.map(|(_,seen)|seen);
+        // Loss must reset a partially completed attempt even between HMD frames.
+        if !input.ready || input.hmd.is_none_or(|(_,seen)|t<seen || t-seen>0.25) {
+            self.head_recenter.reset();self.head_recenter_accel_baseline=[None;2];return;
+        }
+        if self.head_recenter_hmd_seen==head_seen {return;}
+        self.head_recenter_hmd_seen=head_seen;
+        if !self.head_recenter.update(&input) {return;}
+        let was_armed=self.engine.armed;
+        let Some(head)=self.hmd else{return};
+        let accel_baseline=self.head_recenter_accel_baseline;
+        if let Err(error)=self.command(&json!({"command":"calibrate"}),t) {
+            self.head_recenter_resume_result=format!("Automatic recenter failed: {error}");return;
+        }
+        // Keep the attempt's frozen acceleration reference during the neutral
+        // confirmation; rebasing here could hide movement in its first frame.
+        self.head_recenter_accel_baseline=accel_baseline;
+        self.walking_signal=Default::default();self.walking_speed=0.;self.walking_effort=0.;
+        self.action_preview=Default::default();
+        self.head_recenter_resume_result=if was_armed {"Recentered; waiting for fresh driver confirmation"}else{"Recentered; movement remains stopped"}.into();
+        if was_armed {
+            self.head_recenter_resume=Some(HeadRecenterResume{generation:self.generation,started:t,pose:input,head,last_head:head});
+        }
+    }
     pub fn driver_ready(&self, t: f64) -> bool {
         t >= self.ack_seen && t - self.ack_seen <= 0.25 && self.ack_flags & 7 == 7
     }
     fn steamvr_lost(&mut self,t:f64) {
+        self.cancel_head_recenter_resume("SteamVR tracking lost; automatic resume cancelled");
+        self.head_recenter.reset();
         let a=self.actions.settings();
         let head_dependent=(a.direction.enabled && a.direction.decouple) || a.turn.enabled || a.crouch.enabled || (a.jump.enabled && a.jump.source=="height") || (self.gestures.settings().enabled && self.gestures.settings().mappings.iter().any(|m|m.source=="hmd"));
         let preserve=self.movement_engine=="body_tilt" && !head_dependent && self.engine.calibrated && self.engine.fresh(t) && self.validated_rotation(2,t).is_some();
@@ -1827,7 +1962,7 @@ impl Lab {
     pub fn steam_packet(&mut self, t: f64) -> Vec<u8> {
         if self.output_mode == "steamvr" && !self.demo && t.is_finite() {
             let since = *self.steam_retry_since.get_or_insert(t);
-            if t >= since && t - since >= 1. {
+            if self.head_recenter_resume.is_none() && t >= since && t - since >= 1. {
                 // An expired driver session rejects the same generation indefinitely.
                 // Retry with a neutral new generation, never restoring armed output.
                 if self.engine.armed { self.steamvr_lost(t); }
@@ -1992,6 +2127,14 @@ impl Lab {
         result["mounting_calibration"] = json!({"valid":self.mounting_valid(t),"tracker_identity":self.current_mounting_identity(t),"learned_identity":self.learned_mounting_identity,"mapping":self.learned_mounting_identity.as_ref().and_then(|id|self.device_mountings.get(id)),"message":if self.mounting_valid(t) {""} else {"Sensor calibration required for this chest tracker"}});
         result["game_profiles"] = self.game_profiles.clone();
         result["foot_motion"] = self.engine.foot_motion_snapshot(t);
+        result["calibration_epoch"] = json!(self.calibration_epoch);
+        result["head_recenter"] = self.head_recenter.snapshot();
+        result["head_recenter"]["settings"] = self.head_recenter.settings().to_json();
+        result["head_recenter"]["pending_resume"] = json!(self.head_recenter_resume.is_some());
+        result["head_recenter"]["resume_generation"] = json!(self.head_recenter_resume.as_ref().map(|s|s.generation));
+        result["head_recenter"]["resume_remaining_ms"] = json!(self.head_recenter_resume.as_ref().map(|s|((3.-(t-s.started)).max(0.)*1000.) as u64));
+        result["head_recenter"]["resume_result"] = json!(self.head_recenter_resume_result);
+
         result["steamvr"]["ack_age_ms"] = if self.ack_seen>=0. && t>=self.ack_seen {json!((t-self.ack_seen)*1000.)}else{Value::Null};
         result["steamvr"]["neutral_handshake_pending"] = json!(self.neutral_pending);
         result["hmd_pose"]=json!({"fresh":hmd.is_some(),"height":hmd.map(|h|h.height),"sample_time":hmd.map(|h|h.seen),"sequence":if hmd.is_some(){self.v2_sequence}else{None}});
@@ -2016,6 +2159,107 @@ mod tests {
         lab.ack_seen = 1.; lab.ack_flags = 7; lab.neutral_pending = false;
         lab.save(&lab.mapping,&lab.engine.cfg,&lab.output_mode).unwrap();
         (dir,lab)
+    }
+    struct HeadRun { dir:PathBuf, lab:Lab, t:f64, yaw:f64 }
+    impl HeadRun {
+        fn new(armed:bool)->Self {
+            let dir=std::env::temp_dir().join(format!("head-center-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let mut lab=Lab::new(dir.join("config.json")).unwrap();
+            lab.mapping=["left:0".into(),"right:0".into(),"chest:0".into()];
+            lab.engine.cfg.continuous=false;lab.engine.cfg.cadence=true;lab.engine.cfg.y_up=true;
+            lab.output_mode="steamvr".into();lab.protocol_v2=true;
+            let mut settings=lab.actions.settings().clone();settings.direction.enabled=true;settings.direction.decouple=true;
+            lab.actions=crate::actions::ActionProcessor::new(settings).unwrap();
+            lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":true}}),0.).unwrap();
+            let mut run=Self{dir,lab,t:1.,yaw:0.};run.sample(0.);
+            run.lab.command(&json!({"command":"calibrate"}),run.t).unwrap();
+            run.lab.ack_seen=run.t;run.lab.ack_flags=7;run.lab.ack_sequence=Some(0);run.lab.neutral_pending=false;
+            if armed {run.lab.command(&json!({"command":"arm"}),run.t).unwrap();}
+            run.hold(0.6);run
+        }
+        fn frame(&mut self,yaw:f64,driver_ack:bool) {
+            self.t+=0.02;self.yaw=yaw;
+            let h=0.2f64;let chest=[h.cos(),0.,h.sin(),0.];
+            for i in 0..3 {
+                let q=if i==2{chest}else{crate::gait::IDENTITY};
+                self.lab.records.insert(self.lab.mapping[i].clone(),Record{q,seen:self.t,angular:0.,has_interval:true});
+                self.lab.engine.update(i,q,self.t).unwrap();
+                if i<2 {self.lab.accelerations.insert(self.lab.mapping[i].clone(),Acceleration{vector:[0.;3],seen:self.t,count:1});self.lab.engine.update_acceleration(i,[0.;3],self.t).unwrap();}
+            }
+            self.lab.hmd=Some(crate::actions::TimedHmd{height:1.7,yaw,pitch:0.,roll:0.,seen:self.t});
+            if driver_ack {self.lab.ack_seen=self.t;self.lab.ack_flags=7;self.lab.ack_sequence=Some(0);}
+            self.lab.tick_head_recenter(self.t);
+        }
+        fn sample(&mut self,yaw:f64){let ack=self.lab.head_recenter_resume.is_none();self.frame(yaw,ack);}
+        fn hold(&mut self,seconds:f64){for _ in 0..(seconds/0.02).round() as usize {self.sample(self.yaw);}}
+        fn move_to(&mut self,degrees:f64){let start=self.yaw;let target=degrees.to_radians();let n=((target-start).abs()/4f64.to_radians()).ceil() as usize;for i in 1..=n {self.sample(start+(target-start)*i as f64/n as f64);}self.hold(0.12);}
+        fn pairs(&mut self,n:usize){for _ in 0..n {self.move_to(90.);self.move_to(-90.);}}
+        fn complete(&mut self){self.pairs(4);self.move_to(0.);self.hold(0.7);}
+        fn ack(&mut self,generation:u32) {
+            let packet=self.lab.steam_packet(self.t);self.lab.steam_sent(Ok(packet.len()));
+            let mut ack=[0u8;32];ack[..4].copy_from_slice(b"AKV2");ack[4..8].copy_from_slice(&packet[4..8]);ack[8..12].copy_from_slice(&generation.to_le_bytes());ack[12..16].copy_from_slice(&7u32.to_le_bytes());
+            for (offset,value) in [(16,1.7f32),(20,self.yaw as f32),(24,0.),(28,0.)] {ack[offset..offset+4].copy_from_slice(&value.to_le_bytes());}
+            self.lab.steam_ack(&ack,([127,0,0,1],self.lab.steam_port).into(),self.t);
+        }
+    }
+    #[test]
+    fn head_recenter_settings_are_atomic_persistent_and_preserve_live_session() {
+        let (dir,mut lab)=foot_motion_fixture();let before=lab.snapshot(1.);let disk=fs::read(&lab.config).unwrap();
+        for settings in [Value::Null,json!({}),json!({"enabled":"yes"}),json!({"enabled":true,"other":false})] {
+            assert!(lab.command(&json!({"command":"head_recenter_settings","settings":settings}),2.).is_err());assert_eq!(lab.snapshot(1.),before);assert_eq!(fs::read(&lab.config).unwrap(),disk);
+        }
+        assert!(lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":true},"extra":1}),2.).is_err());assert_eq!(lab.snapshot(1.),before);
+        lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":true}}),2.).unwrap();
+        assert!(lab.engine.armed&&lab.engine.calibrated);assert_eq!(lab.generation,before["steamvr"]["generation"].as_u64().unwrap() as u32);assert_eq!(lab.calibration_epoch,0);assert_eq!(lab.engine.speed,0.43);
+        let loaded=Lab::new(lab.config.clone()).unwrap();assert!(loaded.head_recenter.settings().enabled);assert_eq!(loaded.mapping,lab.mapping);assert_eq!(loaded.device_mountings,lab.device_mountings);
+        lab.command(&json!({"command":"profile_save","name":"Head"}),2.).unwrap();assert_eq!(lab.profile_store().load("Head").unwrap()["head_recenter"],json!({"enabled":true}));
+        lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":false}}),2.).unwrap();lab.command(&json!({"command":"profile_load","name":"Head"}),2.).unwrap();assert!(lab.head_recenter.settings().enabled);
+        let before=lab.snapshot(1.);fs::remove_file(&lab.config).unwrap();fs::create_dir(&lab.config).unwrap();assert!(lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":false}}),2.).is_err());assert_eq!(lab.snapshot(1.),before);fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn head_recenter_four_pairs_center_head_chest_and_preserve_stopped_and_mounting() {
+        let mut r=HeadRun::new(false);let epoch=r.lab.calibration_epoch;let generation=r.lab.generation;
+        r.lab.device_mountings.insert("wearer".into(),json!({"learned_forward":[1.,0.,0.]}));let mounts=r.lab.device_mountings.clone();let mapping=r.lab.mapping.clone();
+        r.pairs(3);r.move_to(0.);r.hold(0.7);assert_eq!(r.lab.calibration_epoch,epoch);
+        // Start a fresh deliberate gesture after the incomplete attempt.
+        r.lab.head_recenter.reset();r.hold(0.6);r.complete();
+        assert_eq!(r.lab.calibration_epoch,epoch+1);assert_ne!(r.lab.generation,generation);assert!(r.lab.engine.calibrated&&!r.lab.engine.armed);assert!(r.lab.head_recenter_resume.is_none());assert!(r.lab.actions.has_head_center());
+        r.lab.engine.tick(r.t);assert!(r.lab.engine.heading.abs()<1e-8);let result=r.lab.actions.process(&r.lab.action_input(r.t));assert!(result.travel_xy.iter().all(|v|v.abs()<1e-8));assert!(!result.jump_pressed&&!result.crouch_pressed);assert_eq!(r.lab.device_mountings,mounts);assert_eq!(r.lab.mapping,mapping);assert_eq!(r.lab.output_buttons,0);assert_eq!(r.lab.engine.speed,0.);fs::remove_dir_all(r.dir).unwrap();
+    }
+    #[test]
+    fn head_recenter_armed_waits_neutral_for_new_generation_ack_then_normal_arm() {
+        let mut r=HeadRun::new(true);let old=r.lab.generation;r.complete();let generation=r.lab.generation;
+        assert!(r.lab.head_recenter_resume.is_some());assert!(!r.lab.engine.armed);assert_ne!(old,generation);
+        let packet=r.lab.steam_packet(r.t);assert!(packet[12..].iter().all(|v|*v==0));
+        r.ack(old);r.lab.tick_head_recenter(r.t);assert!(!r.lab.engine.armed&&r.lab.head_recenter_resume.is_some());
+        r.ack(generation);r.lab.tick_head_recenter(r.t);assert!(r.lab.engine.armed);assert!(r.lab.head_recenter_resume.is_none());assert_eq!(r.lab.generation,generation);assert_eq!(r.lab.engine.speed,0.);fs::remove_dir_all(r.dir).unwrap();
+    }
+    #[test]
+    fn head_recenter_pending_resume_cancels_on_stop_motion_stale_disable_and_timeout() {
+        for failure in 0..9 {
+            let mut r=HeadRun::new(true);r.complete();assert!(r.lab.head_recenter_resume.is_some());let epoch=r.lab.calibration_epoch;
+            match failure {
+                0=>r.lab.command(&json!({"command":"stop"}),r.t).unwrap(),
+                1=>{r.lab.hmd.as_mut().unwrap().yaw=0.2;r.lab.tick_head_recenter(r.t);},
+                2=>r.lab.tick_head_recenter(r.t+0.3),
+                3=>r.lab.command(&json!({"command":"head_recenter_settings","settings":{"enabled":false}}),r.t).unwrap(),
+                4=>r.lab.tick_head_recenter(r.t+3.1),
+                5=>{r.lab.accelerations.get_mut(&r.lab.mapping[0]).unwrap().vector=[1.,0.,0.];r.lab.tick_head_recenter(r.t);},
+                6=>{r.frame(0.04,false);},
+                7=>{r.lab.sensor_status.insert(r.lab.mapping[0].clone(),0);r.lab.tick_head_recenter(r.t);},
+                _=>r.lab.command(&json!({"command":"reset_test"}),r.t).unwrap(),
+            }
+            assert!(r.lab.head_recenter_resume.is_none());assert!(!r.lab.engine.armed);assert_eq!(r.lab.calibration_epoch,epoch);r.ack(r.lab.generation);r.lab.tick_head_recenter(r.t);assert!(!r.lab.engine.armed);fs::remove_dir_all(r.dir).unwrap();
+        }
+    }
+    #[test]
+    fn head_recenter_ordinary_looking_and_unvalidated_chest_cannot_trigger() {
+        let mut r=HeadRun::new(false);let epoch=r.lab.calibration_epoch;for _ in 0..5 {r.move_to(40.);r.move_to(-40.);}r.move_to(0.);r.hold(0.7);assert_eq!(r.lab.calibration_epoch,epoch);
+        r.lab.head_recenter.reset();r.lab.sensor_status.insert(r.lab.mapping[2].clone(),0);r.complete();assert_eq!(r.lab.calibration_epoch,epoch);assert!(!r.lab.engine.armed);fs::remove_dir_all(r.dir).unwrap();
+    }
+    #[test]
+    fn head_recenter_epoch_only_advances_after_successful_regular_calibrate() {
+        let mut r=HeadRun::new(false);let epoch=r.lab.calibration_epoch;r.lab.new_generation();assert_eq!(r.lab.calibration_epoch,epoch);r.lab.command(&json!({"command":"calibrate"}),r.t).unwrap();assert_eq!(r.lab.calibration_epoch,epoch+1);assert!(r.lab.command(&json!({"command":"calibrate"}),r.t+1.).is_err());assert_eq!(r.lab.calibration_epoch,epoch+1);fs::remove_dir_all(r.dir).unwrap();
     }
     #[test]
     fn foot_motion_live_save_load_preserves_armed_session_mounting_and_roles() {

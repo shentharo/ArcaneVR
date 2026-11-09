@@ -10,6 +10,7 @@ pub mod cadence;
 pub mod gait;
 pub mod foot_motion;
 pub mod gestures;
+pub mod head_recenter;
 pub mod lab;
 pub mod mounting;
 pub mod profiles;

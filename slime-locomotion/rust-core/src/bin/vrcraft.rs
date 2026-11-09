@@ -20,6 +20,8 @@ mod body_setup;
 mod locomotion_panel;
 #[path = "../desktop/foot_motion_panel.rs"]
 mod foot_motion_panel;
+#[path = "../desktop/head_recenter_panel.rs"]
+mod head_recenter_panel;
 #[path = "../desktop/overlay.rs"]
 mod overlay;
 #[path = "../desktop/pages.rs"]
@@ -146,6 +148,7 @@ struct ArcaneVR {
     selected_sensor: Option<String>,
     locomotion_panel: locomotion_panel::LocomotionPanel,
     foot_motion_panel: foot_motion_panel::FootMotionPanel,
+    head_recenter_panel: head_recenter_panel::HeadRecenterPanel,
     action_pages: action_pages::ActionPages,
     chest_tuning: chest_tuning::ChestTuning,
     old_chest_main: bool,
@@ -258,6 +261,7 @@ impl ArcaneVR {
             selected_sensor: None,
             locomotion_panel: locomotion_panel::LocomotionPanel::default(),
             foot_motion_panel: foot_motion_panel::FootMotionPanel::default(),
+            head_recenter_panel: head_recenter_panel::HeadRecenterPanel::default(),
             action_pages: action_pages::ActionPages::default(),
             chest_tuning: chest_tuning::ChestTuning::default(),
             old_chest_main: false,
@@ -744,6 +748,7 @@ impl eframe::App for ArcaneVR {
                 pages::Page::TestRoom=>{
                     if !status.error.is_empty(){ui.colored_label(Color32::YELLOW,&status.error);}
                     if let Some(command)=self.foot_motion_panel.show(ui,s,status.online,busy,&status.error) {self.send(command);}
+                    if let Some(command)=self.head_recenter_panel.show(ui,s,status.online,busy) {self.send(command);}
                     if let Some(command)=strafe_toggle::show(ui,s,status.online,busy){self.walking=false;self.send(json!({"command":"stop"}));self.send(command);}
                     if status.online && !busy && s["mode"]=="live" && s["armed"]==false && s["calibration_ready"]==true
                         && (s["calibrated"]!=true || s["actions"]["preview"]["calibrated"]!=true)

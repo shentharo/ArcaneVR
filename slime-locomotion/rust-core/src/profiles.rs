@@ -73,6 +73,7 @@ impl ProfileStore {
             "step_input",
             "locomotion",
             "foot_motion",
+            "head_recenter",
             "actions",
             "gestures",
             "movement_engine",
@@ -82,6 +83,9 @@ impl ProfileStore {
         ];
         if object.is_empty() || object.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
             return Err("settings may contain only locomotion, actions, movement_engine, detection and output mode".into());
+        }
+        if let Some(settings)=object.get("head_recenter") {
+            crate::head_recenter::Settings::from_json(settings).map_err(str::to_owned)?;
         }
         if let Some(settings)=object.get("foot_motion") {
             crate::foot_motion::Settings::from_json(settings).map_err(str::to_owned)?;
