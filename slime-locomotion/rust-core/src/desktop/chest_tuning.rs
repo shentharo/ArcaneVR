@@ -112,6 +112,8 @@ fn output_meter(state:&Value, online:bool, fresh:bool)->Option<OutputMeter> {
 }
 pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,state:&Value,online:bool,fresh:bool,details:bool)->bool {
  let mut changed=check(ui,d,"sprint_full_forward",if state["step_input"]=="feet" {"Lean to sprint"}else{"Sprint"});
+ let yaw=preview["chest_yaw"].as_f64().filter(|v|fresh && v.is_finite() && v.to_degrees().is_finite());
+ ui.colored_label(CYAN,match yaw {Some(yaw)=>format!("Rotation {:+.1}°",yaw.to_degrees()),None=>"Rotation unavailable".to_owned()});
  let mut full_x=d["horizontal_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full_y=d["forward_max_angle"].as_f64().unwrap_or(number(&d["max_angle"]));
  let mut full=full_x.max(full_y);let mut sprint=d["sprint_angle"].as_f64().unwrap_or((full*1.15).min(3.14)).max(full);
@@ -121,7 +123,7 @@ pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,
  let start_key=ui.make_persistent_id("lean_ring_zoom_start");
  let mut top=c-egui::vec2(0.,radius);
  let zoom_response=ui.interact(egui::Rect::from_center_size(top-egui::vec2(0.,8.),egui::vec2(100.,40.)),ui.make_persistent_id("lean_ring_zoom_grip"),egui::Sense::drag());
- let mut view=ui.data(|data|data.get_temp::<f64>(zoom_key)).unwrap_or((sprint*1.35).max(0.8));
+ let mut view=ui.data(|data|data.get_temp::<f64>(zoom_key)).unwrap_or(16_f64.to_radians());
  if zoom_response.drag_started(){ui.data_mut(|data|data.insert_temp(start_key,view));}
  if zoom_response.dragged() || zoom_response.drag_stopped(){
   let start=ui.data(|data|data.get_temp::<f64>(start_key)).unwrap_or(view);
@@ -163,13 +165,10 @@ pub(super) fn target(ui:&mut egui::Ui,d:&mut Value,_saved:&Value,preview:&Value,
  if d["sprint_full_forward"]==true {ellipse(sprint,sprint,purple);let sp=c+egui::vec2(0.707,0.707)*(radius*(sprint/view) as f32);p.circle_filled(sp,7.,purple);p.text(sp+egui::vec2(10.,9.),egui::Align2::LEFT_TOP,"Sprint",egui::FontId::proportional(12.),purple);}
  for (offset,label) in [(egui::vec2(48.,-radius-13.),"FORWARD"),(egui::vec2(35.,radius+13.),"BACK"),(egui::vec2(-radius-15.,20.),"L"),(egui::vec2(radius+15.,20.),"R")] {p.text(c+offset,egui::Align2::CENTER_CENTER,label,egui::FontId::proportional(11.),MUTED);}
  if let Some([x,y])=adjusted_angles(preview,_saved,fresh){let vector=egui::vec2((x/view) as f32,-(y/view) as f32);let point=c+vector/vector.length().max(1.)*radius;p.line_segment([c,point],Stroke::new(2.,CYAN));p.circle_filled(point,6.,CYAN);}
- if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64().filter(|v|v.is_finite()) {
-  let radial=egui::vec2(yaw.sin() as f32,-yaw.cos() as f32);let tangent=egui::vec2(-radial.y,radial.x);let tip=c+radial*(radius+10.);let base=c+radial*(radius+22.);
+ if let Some(yaw)=yaw {
+  let radial=egui::vec2(-yaw.sin() as f32,-yaw.cos() as f32);let tangent=egui::vec2(-radial.y,radial.x);let tip=c+radial*(radius+10.);let base=c+radial*(radius+22.);
   p.add(egui::Shape::convex_polygon(vec![tip,base+tangent*6.,base-tangent*6.],CYAN,Stroke::NONE));
- }}
- let yc=egui::pos2(area.right()-28.,area.top()+26.);p.circle_stroke(yc,18.,Stroke::new(1.,MUTED));
- if fresh {if let Some(yaw)=preview["chest_yaw"].as_f64(){p.line_segment([yc,yc+egui::vec2(yaw.sin() as f32,-yaw.cos() as f32)*15.],Stroke::new(2.,CYAN));}}
- p.text(yc+egui::vec2(0.,23.),egui::Align2::CENTER_TOP,"YAW",egui::FontId::proportional(10.),MUTED);
+ }
  // The bars show final receiver stick output; the rings above are lean angles.
  let meter=output_meter(state,online,fresh);
  let bar_color=Color32::from_rgb(64,220,229);
@@ -276,6 +275,47 @@ impl ChestTuning {
 
 #[cfg(test)] mod tests {
  use super::*;
+ fn render_target(d:&mut Value,preview:&Value,fresh:bool,width:f32)->(Vec<egui::epaint::ClippedShape>,f64,bool) {
+  let ctx=egui::Context::default();let saved=d.clone();let mut zoom=0.;let mut changed=false;
+  let output=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,1000.))),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{
+   changed=target(ui,d,&saved,preview,&json!({}),true,fresh,false);
+   zoom=ui.data(|data|data.get_temp::<f64>(ui.make_persistent_id("lean_ring_zoom"))).unwrap();
+  });});
+  (output.shapes,zoom,changed)
+ }
+ fn user_direction()->Value {let mut d=arcane_bridge_core::actions::Settings::default().to_json()["direction"].clone();d["max_angle"]=json!(9.2_f64.to_radians());d["horizontal_max_angle"]=Value::Null;d["forward_max_angle"]=Value::Null;d["sprint_angle"]=json!(11.6_f64.to_radians());d}
+ #[test] fn target_defaults_to_sixteen_degree_view_without_changing_settings() {
+  let mut d=user_direction();let saved=d.clone();let (shapes,zoom,changed)=render_target(&mut d,&json!({"chest_yaw":0.}),true,240.);
+  assert!((zoom.to_degrees()-16.).abs()<1e-9);assert!(!changed);assert_eq!(d,saved);
+  let labels:Vec<_>=shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape {Some((t.galley.job.text.as_str(),t.visual_bounding_rect()))}else{None}).collect();
+  let rotation=labels.iter().find(|(t,_)|*t=="Rotation +0.0°").unwrap().1;
+  let range=labels.iter().find(|(t,_)|*t=="Range 16.0° ↕").unwrap().1;
+  assert!(rotation.bottom()<range.top(),"rotation and range must occupy separate rows at compact width");
+  assert!(!labels.iter().any(|(t,_)|*t=="YAW"));
+  let ring_center=shapes.iter().find_map(|s|if let egui::Shape::Circle(c)=&s.shape {if c.fill==Color32::from_rgb(11,25,37){Some(c.center)}else{None}}else{None}).unwrap();
+  assert!(!shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if c.radius==18. && c.center!=ring_center)));
+  d["sprint_angle"]=json!(40_f64.to_radians());let saved=d.clone();let (_,zoom,changed)=render_target(&mut d,&json!({}),false,600.);
+  assert!((zoom-40_f64.to_radians()/0.9).abs()<1e-9);assert!(!changed);assert_eq!(d,saved);
+ }
+ #[test] fn target_triangle_mirrors_only_horizontal_rotation_and_preserves_lean_axes() {
+  for degrees in [-90_f64,0.,90.,180.] {
+   let mut d=user_direction();let (shapes,_,_)=render_target(&mut d,&json!({"chest_yaw":degrees.to_radians(),"raw_direction_angles":[0.02,0.03]}),true,600.);
+   let circle=shapes.iter().find_map(|s|if let egui::Shape::Circle(c)=&s.shape {if c.fill==Color32::from_rgb(11,25,37){Some(c)}else{None}}else{None}).unwrap();
+   let triangle=shapes.iter().find_map(|s|if let egui::Shape::Path(p)=&s.shape {if p.fill==CYAN && p.points.len()==3{Some(p)}else{None}}else{None}).unwrap();
+   let expected=circle.center+egui::vec2(-degrees.to_radians().sin() as f32,-degrees.to_radians().cos() as f32)*(circle.radius+10.);
+   assert!(triangle.points[0].distance(expected)<0.001);
+   let dot=shapes.iter().find_map(|s|if let egui::Shape::Circle(c)=&s.shape {if c.fill==CYAN && c.radius==6.{Some(c.center)}else{None}}else{None}).unwrap();
+   assert!(dot.x>circle.center.x && dot.y<circle.center.y,"lean axes retain positive right and forward");
+   assert!(shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.job.text==format!("Rotation {degrees:+.1}°"))));
+  }
+ }
+ #[test] fn target_rotation_requires_fresh_finite_degrees() {
+  for (preview,fresh) in [(json!({"chest_yaw":0.5}),false),(json!({}),true),(json!({"chest_yaw":f64::MAX}),true)] {
+   let (shapes,_,_)=render_target(&mut user_direction(),&preview,fresh,240.);
+   assert!(shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.job.text=="Rotation unavailable")));
+   assert!(!shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Path(p) if p.fill==CYAN && p.points.len()==3)));
+  }
+ }
  #[test] fn output_meter_uses_final_receiver_values_and_requires_fresh_data() {
   let state=json!({"actions":{"preview":{"travel_xy":[0.9,0.9]}},"game_output_preview":{"travel_xy":[-0.25,0.75],"buttons":4,"armed":false}});
   assert_eq!(output_meter(&state,true,true),Some(OutputMeter{x:-0.25,y:0.75,sprint:true,armed:false}));

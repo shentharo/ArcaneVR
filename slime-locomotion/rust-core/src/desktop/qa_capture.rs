@@ -10,6 +10,9 @@ pub fn update_embedded(ctx:&egui::Context, embedded_ready:bool){
   let result=(||->Result<(),Box<dyn std::error::Error>>{let file=std::fs::File::create(&path)?;let mut encoder=png::Encoder::new(file,image.size[0] as u32,image.size[1] as u32);encoder.set_color(png::ColorType::Rgba);encoder.set_depth(png::BitDepth::Eight);let mut writer=encoder.write_header()?;let bytes:Vec<u8>=image.pixels.iter().flat_map(|p|p.to_array()).collect();writer.write_image_data(&bytes)?;Ok(())})();
   eprintln!("App render capture {path}: {result:?}");ctx.send_viewport_cmd(egui::ViewportCommand::Close);return;
  }}
+ // The cog QA action requests its capture after drawing the first destination
+ // frame, while the deliberately delayed renderer is still loading.
+ if std::env::args().any(|arg|arg=="--qa-cog"){return;}
  if std::env::var_os("ARCANEVR_EMBED_QA").is_some() {
   // QA-only capture waits for real native embedding and navigation completion;
   // frame counts can race a slow GPU/child process during DX12 initialization.

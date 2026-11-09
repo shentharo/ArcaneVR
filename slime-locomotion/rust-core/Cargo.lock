@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "arcane-bridge-core"
-version = "1.1.16"
+version = "1.1.17"
 dependencies = [
  "base64",
  "eframe",

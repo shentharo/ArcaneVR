@@ -294,6 +294,17 @@ impl ArcaneVR {
             usb_wizard: usb_wizard::UsbWizard::default(),
         }
     }
+    fn navigate_home(&mut self, page: pages::Page, ctx: &egui::Context) {
+        if page == pages::Page::Settings {
+            self.page = pages::Page::TestRoom;
+            self.show_movement_preview = true;
+            if std::env::args().any(|arg|arg=="--qa-cog") {
+                ctx.data_mut(|d|d.insert_temp(egui::Id::new("cog navigation started"), Instant::now()));
+                bevy_room::cog_qa_report("home_cog_action", json!({"frame":ctx.cumulative_frame_nr()}));
+            }
+        } else { self.page = page; }
+        ctx.request_repaint();
+    }
     fn send(&self, value: Value) {
         let _ = self.tx.send(value);
     }
@@ -317,6 +328,8 @@ impl Drop for ArcaneVR {
 }
 impl eframe::App for ArcaneVR {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let update_started = Instant::now();
+        let page_at_update_start = self.page;
         #[cfg(windows)]
         apply_rounded_window(ctx, frame);
         ctx.request_repaint_after(Duration::from_millis(80));
@@ -635,9 +648,15 @@ impl eframe::App for ArcaneVR {
                             self.walking=false;self.send(command);
                         }
                     } else {
-                    if let Some(action)=home_dashboard::show(ui,s,status.online,busy,false,ready && !busy && !self.bevy_room.sensor_calibration_open() && s["calibrated"]==true && driver_ready && actions_output_ready && s["locomotion"]["input_ready"]==true){match action{
+                    let mut action=home_dashboard::show(ui,s,status.online,busy,false,ready && !busy && !self.bevy_room.sensor_calibration_open() && s["calibrated"]==true && driver_ready && actions_output_ready && s["locomotion"]["input_ready"]==true);
+                    if std::env::args().any(|arg|arg=="--qa-cog") {
+                        let key=egui::Id::new("cog qa home started");
+                        let started=ctx.data_mut(|d|{let at=d.get_temp::<Instant>(key).unwrap_or_else(Instant::now);d.insert_temp(key,at);at});
+                        if started.elapsed()>=Duration::from_secs(1) { action=Some(home_dashboard::Action::Navigate(Page::Settings)); }
+                    }
+                    if let Some(action)=action {match action{
                         home_dashboard::Action::Command(command)=>{self.send(json!({"command":"stop"}));self.send(command);},
-                        home_dashboard::Action::Navigate(page)=>{if page==Page::Settings {self.page=Page::TestRoom;self.show_movement_preview=true;} else {self.page=page;}},
+                        home_dashboard::Action::Navigate(page)=>self.navigate_home(page,ctx),
                         home_dashboard::Action::Edit=>self.page=Page::QuickSetup,
                         home_dashboard::Action::Done=>{},
                         home_dashboard::Action::ForceSteamHome=>{
@@ -832,6 +851,24 @@ impl eframe::App for ArcaneVR {
             if !status.error.is_empty(){ui.colored_label(Color32::from_rgb(244,170,94),&status.error);}
             if self.debug {ui.collapsing("Debug state",|ui|{ui.monospace(serde_json::to_string_pretty(s).unwrap_or_default());});}
         });});
+        // Navigation can happen while drawing Home or the header. Schedule the
+        // destination immediately and apply visibility in the same update.
+        if self.page != page_at_update_start { ctx.request_repaint(); }
+        self.bevy_room.set_page_visible(
+            (self.page == pages::Page::TestRoom && self.new_test)
+            || (self.page == pages::Page::Home && self.bevy_room.sensor_calibration_open())
+        );
+        if self.page == pages::Page::TestRoom && page_at_update_start == pages::Page::TestRoom {
+            let key=egui::Id::new("cog navigation started");
+            if let Some(started)=ctx.data_mut(|d|{let started=d.get_temp::<Instant>(key);d.remove::<Instant>(key);started}) {
+                bevy_room::cog_qa_report("first_test_ui_frame",json!({
+                    "frame":ctx.cumulative_frame_nr(),"action_to_ui_ms":started.elapsed().as_secs_f64()*1000.,
+                    "ui_update_ms":update_started.elapsed().as_secs_f64()*1000.,
+                    "startup_pending":self.bevy_room.startup_pending(),"embedded_ready":self.bevy_room.qa_embedded_ready()
+                }));
+                if qa_capture::path().is_some() {ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));}
+            }
+        }
         if self.network_open {
             let mut open = true;
             egui::Window::new("Sensor network addresses").open(&mut open).default_width(650.).show(ctx,|ui| {

@@ -2,12 +2,56 @@
 use eframe::egui::{self, Color32};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{json, Value};
-use std::{io::Write, path::PathBuf, process::{Child, Command, Stdio}, time::{Duration, Instant}};
+use std::{io::Write, path::PathBuf, process::{Child, Command, Stdio}, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, SyncSender, TryRecvError}}, time::{Duration, Instant}};
 const BUNDLED_VIEWER:&[u8]=include_bytes!(concat!(env!("OUT_DIR"),"/embedded-test-room.exe"));
+
+// A result may still be queued when navigation or application shutdown cancels it.
+// Owning the process here ensures dropping that result never leaves a late child.
+struct StartedViewer {
+    child: Option<Child>,
+    stdin: Option<SyncSender<String>>,
+}
+impl Drop for StartedViewer {
+    fn drop(&mut self) {
+        self.stdin = None;
+        if let Some(mut child) = self.child.take() {
+            std::thread::spawn(move || { let _ = child.kill(); let _ = child.wait(); });
+        }
+    }
+}
+struct PendingStart {
+    cancel: Arc<AtomicBool>,
+    result: Receiver<Result<StartedViewer, String>>,
+}
+impl Drop for PendingStart {
+    fn drop(&mut self) { self.cancel.store(true, Ordering::Release); }
+}
+impl PendingStart {
+    fn spawn(prepare: impl FnOnce(&AtomicBool) -> Result<StartedViewer, String> + Send + 'static) -> Result<Self, String> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (tx, result) = mpsc::channel();
+        std::thread::Builder::new().name("movement-viewer-start".into()).spawn(move || {
+            let started = prepare(&worker_cancel);
+            if !worker_cancel.load(Ordering::Acquire) { let _ = tx.send(started); }
+            // A canceled result, or failed send after its owner went away, drops
+            // StartedViewer and reaps the child without waiting on the UI thread.
+        }).map_err(|e| format!("Cannot start movement viewer worker: {e}"))?;
+        Ok(Self { cancel, result })
+    }
+}
+
+pub fn cog_qa_report(event: &str, details: Value) {
+    if !std::env::args().any(|arg| arg == "--qa-cog") { return; }
+    let Some(path) = std::env::var_os("ARCANEVR_COG_QA_REPORT") else { return; };
+    let data = json!({"event":event,"details":details});
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) { let _ = writeln!(file,"{data}"); }
+}
 
 #[derive(Default)]
 pub struct BevyRoom {
     child: Option<Child>, stdin: Option<std::sync::mpsc::SyncSender<String>>, message: String,
+    pending_start: Option<PendingStart>,
     retry_after: Option<Instant>, stopping: Option<std::sync::mpsc::Receiver<()>>,
     attempted: bool, paused: bool, page_visible: bool,
     calibration_preview: bool,
@@ -132,7 +176,7 @@ impl BevyRoom {
             self.attempted=false;
         }
         self.page_visible=true;
-        if allow_spawn && self.stopping.is_none() && (!self.attempted || self.retry_after.is_some_and(|t| Instant::now() >= t)) {
+        if allow_spawn && self.pending_start.is_none() && self.stopping.is_none() && (!self.attempted || self.retry_after.is_some_and(|t| Instant::now() >= t)) {
             self.attempted=true; self.retry_after=Some(Instant::now()+Duration::from_secs(3));
             if let Err(e)=self.start(port) {self.message=e;}
         }
@@ -145,7 +189,7 @@ impl BevyRoom {
             #[cfg(windows)] self.embed(frame,rect,ui.ctx().pixels_per_point());
             #[cfg(not(windows))] {let _=frame;}
         }
-        if self.child.is_some() {ui.ctx().request_repaint_after(Duration::from_millis(100));}
+        if self.child.is_some() || self.pending_start.is_some() {ui.ctx().request_repaint_after(Duration::from_millis(100));}
         command
     }
     pub fn stop_calibration_preview(&mut self) {
@@ -180,7 +224,45 @@ impl BevyRoom {
         }
         Err("Bevy movement viewer is not installed".into())
     }
+    pub fn startup_pending(&self) -> bool { self.pending_start.is_some() }
+    fn cancel_pending_start(&mut self) {
+        if let Some(pending) = &self.pending_start {
+            pending.cancel.store(true, Ordering::Release);
+            // Retain the receiver until the worker completes. This serializes
+            // runtime extraction, including its process-specific temporary file.
+            self.attempted = false;
+            self.retry_after = None;
+        }
+    }
     pub fn poll(&mut self) {
+        if let Some(pending) = &self.pending_start {
+            let canceled = pending.cancel.load(Ordering::Acquire);
+            match pending.result.try_recv() {
+                Ok(Ok(mut started)) => {
+                    if !canceled {
+                        self.child = started.child.take(); self.stdin = started.stdin.take();
+                        self.retry_after = None; self.paused = false;
+                        self.message = "Loading movement preview...".into();
+                    }
+                    self.pending_start = None;
+                }
+                Ok(Err(error)) => {
+                    if !canceled {
+                        self.message = error;
+                        self.retry_after = Some(Instant::now()+Duration::from_secs(3));
+                    }
+                    self.pending_start = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if !canceled {
+                        self.message = "Movement viewer startup worker stopped.".into();
+                        self.retry_after = Some(Instant::now()+Duration::from_secs(3));
+                    }
+                    self.pending_start = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         if self.stopping.as_ref().is_some_and(|rx| !matches!(rx.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty))) { self.stopping=None; }
         if let Some(child) = &mut self.child {
             if let Ok(Some(code)) = child.try_wait() {
@@ -219,8 +301,27 @@ impl BevyRoom {
         self.qa_controls_stage==6
     }
     fn start(&mut self, port: u16) -> Result<(), String> {
-        if self.child.is_some() { return Ok(()); }
+        if self.child.is_some() || self.pending_start.is_some() { return Ok(()); }
+        let calibration_preview = self.calibration_preview;
+        self.pending_start = Some(PendingStart::spawn(move |cancel| Self::prepare_start(port, calibration_preview, cancel))?);
+        self.message = "Loading movement preview...".into();
+        Ok(())
+    }
+    fn prepare_start(port: u16, calibration_preview: bool, cancel: &AtomicBool) -> Result<StartedViewer, String> {
+        let started = Instant::now();
+        if std::env::args().any(|arg| arg == "--qa-cog") {
+            let delay = std::env::var("ARCANEVR_COG_QA_START_DELAY_MS").ok().and_then(|v|v.parse::<u64>().ok()).unwrap_or(0).min(30_000);
+            let until = Instant::now()+Duration::from_millis(delay);
+            while Instant::now()<until {
+                if cancel.load(Ordering::Acquire) { return Err("Viewer startup canceled".into()); }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if cancel.load(Ordering::Acquire) { return Err("Viewer startup canceled".into()); }
+        let preparing = Instant::now();
         let (exe, assets) = Self::paths()?;
+        let preparation_ms = preparing.elapsed().as_secs_f64()*1000.;
+        if cancel.load(Ordering::Acquire) { return Err("Viewer startup canceled".into()); }
         let log = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("No executable directory")?.join("bevy-test-room.log");
         let file = std::fs::File::create(log).map_err(|e| e.to_string())?;
         let mut cmd = Command::new(exe);
@@ -228,7 +329,7 @@ impl BevyRoom {
         cmd.args(["--embedded", "--http-port", &port.to_string(), "--parent-pid", &std::process::id().to_string(), "--asset-root", &assets.to_string_lossy()])
             .arg("--foot-calibration-dir").arg(foot_calibration_dir)
             .stdin(Stdio::piped()).stdout(Stdio::from(file.try_clone().map_err(|e| e.to_string())?)).stderr(Stdio::from(file));
-        if self.calibration_preview {cmd.arg("--calibration-preview");}
+        if calibration_preview {cmd.arg("--calibration-preview");}
         if std::env::var_os("ARCANEVR_EMBED_QA").is_some() {
             if let Some(path) = std::env::var_os("ARCANEVR_VIEWER_QA_SCREENSHOT") { cmd.arg("--screenshot").arg(path); }
             if let Some(at) = std::env::var_os("ARCANEVR_VIEWER_QA_CAPTURE_AT") { cmd.arg("--qa-capture-at").arg(at); }
@@ -237,14 +338,22 @@ impl BevyRoom {
             if let Some(at) = std::env::var_os("ARCANEVR_VIEWER_QA_REPORT_AFTER") { cmd.arg("--qa-report-after").arg(at); }
         }
         #[cfg(windows)] { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
-        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+        if cancel.load(Ordering::Acquire) { return Err("Viewer startup canceled".into()); }
+        let spawning = Instant::now();
+        let child = cmd.spawn().map_err(|e| e.to_string())?;
+        let spawn_ms = spawning.elapsed().as_secs_f64()*1000.;
+        let mut viewer = StartedViewer { child: Some(child), stdin: None };
+        if cancel.load(Ordering::Acquire) { return Err("Viewer startup canceled".into()); }
+        let child = viewer.child.as_mut().unwrap();
         if let Some(mut input)=child.stdin.take() {
             let (tx,rx)=std::sync::mpsc::sync_channel::<String>(8);
             std::thread::spawn(move || { while let Ok(command)=rx.recv() { if writeln!(input,"{command}").and_then(|_|input.flush()).is_err() {break;} } });
-            self.stdin=Some(tx);
+            viewer.stdin=Some(tx);
         }
-        self.retry_after=None; self.child = Some(child); self.paused = false;
-        self.message = "Starting movement viewer…".into(); Ok(())
+        let total_ms = started.elapsed().as_secs_f64()*1000.;
+        eprintln!("Movement viewer startup: prepare={preparation_ms:.2}ms spawn={spawn_ms:.2}ms total={total_ms:.2}ms");
+        cog_qa_report("viewer_started", json!({"preparation_ms":preparation_ms,"spawn_ms":spawn_ms,"total_ms":total_ms,"pid":child.id()}));
+        Ok(viewer)
     }
     fn send(&mut self, command: &str) {
         if let Some(stdin) = &mut self.stdin {
@@ -253,10 +362,12 @@ impl BevyRoom {
     }
     /// Call on every app update, including when the room page is not drawn.
     pub fn set_page_visible(&mut self, visible: bool) {
+        if !visible && self.page_visible { self.cancel_pending_start(); }
         self.page_visible = visible;
         #[cfg(windows)] if !visible { self.hide(); }
     }
     pub fn stop(&mut self) {
+        self.cancel_pending_start();
         #[cfg(windows)] self.hide();
         self.send("quit"); self.stdin = None;
         if let Some(mut child) = self.child.take() {
@@ -281,7 +392,7 @@ impl BevyRoom {
         self.stop_calibration_preview();
         let mut command = None;
         if !self.sensor_calibration.open && !self.sensor_calibration.notice().is_empty() { ui.colored_label(Color32::YELLOW,self.sensor_calibration.notice()); }
-        if allow_spawn && self.stopping.is_none() && (!self.attempted || self.retry_after.is_some_and(|t| Instant::now() >= t)) {
+        if allow_spawn && self.pending_start.is_none() && self.stopping.is_none() && (!self.attempted || self.retry_after.is_some_and(|t| Instant::now() >= t)) {
             self.attempted = true; self.retry_after=Some(Instant::now()+Duration::from_secs(3));
             if let Err(e) = self.start(port) { self.message = e; }
         }
@@ -295,7 +406,7 @@ impl BevyRoom {
             ui.colored_label(Color32::from_rgb(237,188,119), "Headset disconnected · chest-only test. Connect the headset and recenter for headset controls.");
         }
         ui.label(if state["step_input"]=="chest" {"Centering is automatic when the sensor is ready. Lean to steer; walk in place to move forward."} else if state["movement_engine"]=="chest_heading_steps" {"Centering is automatic when sensors are ready. Turn your chest to face a direction; walk in place to move."} else {"Centering is automatic when sensors are ready. Lean to move; turn your chest to change facing."});
-        if self.child.is_some() { ui.ctx().request_repaint_after(Duration::from_millis(100)); }
+        if self.child.is_some() || self.pending_start.is_some() { ui.ctx().request_repaint_after(Duration::from_millis(100)); }
         command
     }
     #[cfg(windows)]
@@ -376,6 +487,103 @@ impl Drop for BevyRoom { fn drop(&mut self) { self.stop(); } }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_preparation_and_poll_do_not_block_ui() {
+        let (release_tx, release_rx)=mpsc::channel();
+        let mut room=BevyRoom::default();
+        let before=Instant::now();
+        room.pending_start=Some(PendingStart::spawn(move |_| {
+            release_rx.recv().unwrap();
+            Err("fixture preparation finished".into())
+        }).unwrap());
+        room.poll();
+        assert!(before.elapsed()<Duration::from_millis(100));
+        assert!(room.startup_pending());
+        assert!(room.child.is_none());
+        release_tx.send(()).unwrap();
+        let until=Instant::now()+Duration::from_secs(3);
+        while room.startup_pending() && Instant::now()<until {room.poll();std::thread::sleep(Duration::from_millis(5));}
+        assert!(!room.startup_pending());
+        assert_eq!(room.message,"fixture preparation finished");
+    }
+    #[test]
+    fn leaving_page_cancels_pending_start_and_serializes_next_attempt() {
+        let (release_tx,release_rx)=mpsc::channel();
+        let (canceled_tx,canceled_rx)=mpsc::channel();
+        let mut room=BevyRoom::default();
+        room.page_visible=true;room.attempted=true;
+        room.pending_start=Some(PendingStart::spawn(move |cancel| {
+            release_rx.recv().unwrap();
+            canceled_tx.send(cancel.load(Ordering::Acquire)).unwrap();
+            Err("canceled fixture".into())
+        }).unwrap());
+        let before=Instant::now();room.set_page_visible(false);room.stop();
+        assert!(before.elapsed()<Duration::from_millis(100));
+        assert!(room.startup_pending(),"retain the worker until extraction is finished");
+        assert!(!room.attempted,"returning must retry after canceled preparation");
+        release_tx.send(()).unwrap();
+        assert!(canceled_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+        let until=Instant::now()+Duration::from_secs(3);
+        while room.startup_pending() && Instant::now()<until {room.poll();std::thread::sleep(Duration::from_millis(5));}
+        assert!(!room.startup_pending());assert!(room.child.is_none());
+        assert!(room.message.is_empty(),"cancellation must not display a startup failure");
+    }
+    // Spawn only this ignored test in the current test executable, without a
+    // renderer, GPU, network, or extra descendant processes.
+    #[test]
+    #[ignore]
+    fn viewer_child_wait_helper() { std::thread::sleep(Duration::from_secs(30)); }
+    #[cfg(windows)]
+    fn light_child() -> Child {
+        use std::os::windows::process::CommandExt;
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored","--exact","bevy_room::tests::viewer_child_wait_helper"])
+            .creation_flags(0x08000000).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+    }
+    #[cfg(windows)]
+    fn assert_process_reaped(pid:u32) {
+        #[link(name="kernel32")]
+        extern "system" {
+            fn OpenProcess(access:u32,inherit:i32,pid:u32)->isize;
+            fn WaitForSingleObject(handle:isize,ms:u32)->u32;
+            fn CloseHandle(handle:isize)->i32;
+        }
+        let handle=unsafe {OpenProcess(0x00100000,0,pid)};
+        if handle!=0 {
+            let result=unsafe {WaitForSingleObject(handle,3000)};
+            unsafe {CloseHandle(handle);}
+            assert_eq!(result,0,"canceled late child must exit");
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn canceling_queued_result_reaps_spawned_child_without_blocking_ui() {
+        let child=light_child();let pid=child.id();
+        let (tx,result)=mpsc::channel();
+        tx.send(Ok(StartedViewer {child:Some(child),stdin:None})).unwrap_or_else(|_|panic!("queue fixture"));
+        let mut room=BevyRoom::default();room.page_visible=true;
+        room.pending_start=Some(PendingStart{cancel:Arc::new(AtomicBool::new(false)),result});
+        let before=Instant::now();room.set_page_visible(false);room.poll();
+        assert!(before.elapsed()<Duration::from_millis(100));
+        assert!(room.child.is_none());assert!(!room.startup_pending());
+        assert_process_reaped(pid);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn dropping_owner_reaps_child_spawned_after_cancel() {
+        let (release_tx,release_rx)=mpsc::channel();let (pid_tx,pid_rx)=mpsc::channel();
+        let mut room=BevyRoom::default();
+        room.pending_start=Some(PendingStart::spawn(move |_| {
+            release_rx.recv().unwrap();
+            let child=light_child();pid_tx.send(child.id()).unwrap();
+            Ok(StartedViewer{child:Some(child),stdin:None})
+        }).unwrap());
+        let before=Instant::now();drop(room);
+        assert!(before.elapsed()<Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        assert_process_reaped(pid_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+    }
 
     #[test]
     fn calibration_menu_retires_normal_viewer_for_fresh_foot_profiles() {
