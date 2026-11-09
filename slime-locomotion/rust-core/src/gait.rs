@@ -121,7 +121,6 @@ pub struct Engine {
     pub cadence_state: crate::cadence::CadenceState,
     foot_intent: crate::foot_motion::Guard,
     pivot_suppressed: bool,
-    pivot_since: Option<f64>,
     pub diagnostic_motion: MotionFilter,
     pub diagnostic: Telemetry,
     diagnostic_baseline: Option<[f64;3]>,
@@ -150,7 +149,7 @@ impl Engine {
         let mut diagnostic_motion=MotionFilter::new(cfg.motion.clone()).expect("validated motion settings");diagnostic_motion.set_single_input(true);
         Self {
             motion, cadence: Cadence::default(), cadence_state: Default::default(),
-            foot_intent: Default::default(), pivot_suppressed: false, pivot_since: None, diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
+            foot_intent: Default::default(), pivot_suppressed: false, diagnostic_motion, diagnostic:Default::default(), diagnostic_baseline:None,
             preview: Default::default(),
             sensors: Default::default(),
             cfg,
@@ -170,37 +169,41 @@ impl Engine {
             last_tick: 0.,
         }
     }
-    /// Live guard adjustment leaves the current walk, calibration and output state intact.
+    /// Live adjustment retains calibration and arming; new steps must establish intent.
     pub fn update_foot_motion_settings(&mut self, settings: crate::foot_motion::Settings) -> Result<(), &'static str> {
         settings.validate()?;
         self.cfg.foot_motion = settings;
         self.foot_intent.clear();
         self.pivot_suppressed = false;
-        self.pivot_since = None;
+        self.stop_cadence(self.last_tick);
         Ok(())
     }
     pub fn foot_motion_snapshot(&self, t: f64) -> serde_json::Value {
         self.foot_intent.snapshot(t, &self.cfg.foot_motion, self.pivot_suppressed)
     }
+    fn stop_cadence(&mut self, t: f64) {
+        // Cadence::stop retains raw activity. Clear both channels first, on every
+        // blocked event/tick, so release cannot replay a pre-turn acceleration.
+        for side in 0..2 { self.cadence.sample(side, 0., None, 0., None, t); }
+        self.cadence.stop();
+        self.cadence_state.speed = 0.;
+        self.cadence_state.target = 0.;
+        self.cadence_state.rate = 0.;
+        self.speed = 0.;
+        self.preview.speed = 0.;
+        self.preview.raw_speed = 0.;
+    }
+    fn turn_gate(&mut self, t: f64) -> bool {
+        self.pivot_suppressed = self.cfg.cadence && !self.cfg.chest_steps
+            && self.foot_intent.translation_blocked(t, &self.cfg.foot_motion);
+        if self.pivot_suppressed { self.stop_cadence(t); }
+        self.pivot_suppressed
+    }
     fn feed_cadence(&mut self, role: usize, t: f64) {
         if !self.cfg.cadence { return; }
+        if self.turn_gate(t) { return; }
         let settings = &self.cfg.foot_motion;
         let evidence = [self.foot_intent.evidence(0, t, settings), self.foot_intent.evidence(1, t, settings)];
-        let pivot = settings.enabled && evidence.iter().any(|e| e.pivot)
-            && !evidence.iter().any(|e| e.qualified);
-        // A stride apex can briefly have little gravity-vector excursion. Also,
-        // the opposite foot's next packet can arrive later at the same timestamp.
-        // Only sustained evidence from both feet confirms an actual pivot episode.
-        if pivot {
-            let since = *self.pivot_since.get_or_insert(t);
-            if t >= since && t - since >= crate::foot_motion::PIVOT_STOP_CONFIRMATION {
-                if !self.pivot_suppressed { self.cadence.stop(); }
-                self.pivot_suppressed = true;
-            }
-        } else {
-            self.pivot_since = None;
-            self.pivot_suppressed = false;
-        }
         // Replace both channels atomically, including on rejected acceleration events.
         let allowed = !settings.enabled || (evidence[role].qualified && evidence[role].ready);
         let (tilt, tilt_at, accel, accel_at) = self.foot_intent.sample(role, t, allowed);
@@ -247,10 +250,9 @@ impl Engine {
             return Err("Calibrate, then wait for fresh chest and both foot samples");
         }
         self.motion.clear_history();
-        self.cadence.stop();
+        self.stop_cadence(t);
         self.foot_intent.clear();
         self.pivot_suppressed = false;
-        self.pivot_since = None;
         self.preview = Default::default();
         self.speed = 0.;
         self.steps.clear();
@@ -277,10 +279,9 @@ impl Engine {
         self.speed = 0.;
         self.steps.clear();
         self.motion.reset();
-        self.cadence.stop();
+        self.stop_cadence(self.last_tick);
         self.foot_intent.clear();
         self.pivot_suppressed = false;
-        self.pivot_since = None;
         self.preview = Default::default();
     }
     pub fn update(&mut self, role: usize, q: Q, t: f64) -> Result<(), &'static str> {
@@ -315,6 +316,10 @@ impl Engine {
         s.seen = t;
         s.rotation_seen = t;
         if role == 2 {
+            if self.cfg.cadence && !self.cfg.chest_steps {
+                self.foot_intent.body_orientation(q, t, self.cfg.y_up);
+                self.turn_gate(t);
+            }
             return Ok(());
         }
         let angular = s.angular;
@@ -434,11 +439,13 @@ impl Engine {
             target = ((1. / interval.max(0.16) - 0.8) / 3.2).clamp(0.15, 0.85);
         }
         if self.cfg.cadence {
+            let blocked = self.turn_gate(t);
             self.preview = self.motion.tick(t);
             self.cadence_state = self.cadence.tick(t);
             self.preview.speed = self.cadence_state.speed;
             self.preview.raw_speed = self.cadence_state.target;
-            self.preview.status = if self.cadence_state.rate > 0. { "walking" } else { "waiting for steps" };
+            self.preview.status = if blocked { "turning: translation paused" }
+                else if self.cadence_state.rate > 0. { "walking" } else { "waiting for steps" };
             self.speed = if active { self.cadence_state.speed } else { 0. };
         } else if self.cfg.continuous {
             if self.armed && !self.input_ready(t) {
@@ -873,7 +880,7 @@ mod foot_intent_tests {
         assert!(a.speed > 0.4);
     }
     #[test]
-    fn genuine_running_through_a_turn_retains_normal_speed() {
+    fn deliberate_turn_pauses_even_running_but_straight_running_stays_fast() {
         let mut straight = engine(false, IDENTITY); let mut turning = engine(false, IDENTITY);
         let (mut a, mut b, mut count) = (0., 0., 0.);
         for n in 2..800 {
@@ -881,12 +888,91 @@ mod foot_intent_tests {
             stride(&mut straight, t, 3.2, 30., 0., IDENTITY, false);
             stride(&mut turning, t, 3.2, 30., t * 2., IDENTITY, false);
             if t > 3. {
-                assert!(turning.speed > 0.85, "running dropped at {t}: {}", turning.foot_motion_snapshot(t));
+                // Intentionally conservative: torso turning pauses translation,
+                // even when a genuine stride is present at the same time.
+                assert_eq!(turning.speed, 0., "turn escaped at {t}: {}", turning.foot_motion_snapshot(t));
                 a += straight.speed; b += turning.speed; count += 1.;
             }
         }
-        assert!(b / count > 0.85, "turning run speed {}", b / count);
-        assert!((a - b).abs() / count < 0.08, "straight {} turning {}", a / count, b / count);
+        assert!(a / count > 0.85, "straight running speed {}", a / count);
+        assert_eq!(b, 0.);
+    }
+    #[test]
+    fn gentle_curved_walking_below_body_turn_threshold_keeps_walking() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..800 {
+            let t = n as f64 * 0.01;
+            stride(&mut e, t, 1., 2.5, t * 10_f64.to_radians(), IDENTITY, false);
+            assert!(!e.pivot_suppressed, "gentle curve suppressed at {t}");
+        }
+        assert!(e.speed > 0.1);
+        assert!(e.cadence_state.steps.iter().sum::<u64>() >= 6);
+    }
+    #[test]
+    fn body_turn_stops_existing_walk_on_chest_packet_and_requires_new_steps() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..400 { let t = n as f64 * 0.01; stride(&mut e, t, 2.2, 25., 0., IDENTITY, false); }
+        assert!(e.speed > 0.3 && e.preview.speed > 0.3);
+        // Chest packet alone must stop both outputs before the next foot packet/tick.
+        e.update(2, rotation([0., 0., 1.], 2_f64.to_radians()), 4.).unwrap();
+        assert_eq!((e.speed, e.preview.speed, e.preview.raw_speed), (0., 0., 0.));
+        assert!(e.pivot_suppressed && e.armed);
+        for n in 400..510 {
+            let t = n as f64 * 0.01;
+            frame(&mut e, t, [0.; 2], 2_f64.to_radians(), [0.; 2], IDENTITY, false, false);
+            assert_eq!((e.speed, e.preview.speed), (0., 0.), "ghost restart at {t}");
+        }
+        assert!(!e.pivot_suppressed);
+        for n in 510..850 { let t = n as f64 * 0.01; stride(&mut e, t, 2.2, 25., 2_f64.to_radians(), IDENTITY, false); }
+        assert!(e.speed > 0.3 && e.armed);
+        e.tick(9.);
+        assert_eq!((e.speed, e.preview.speed, e.cadence_state.speed), (0., 0., 0.));
+        assert!(!e.armed);
+    }
+    #[test]
+    fn full_turn_both_directions_arbitrary_chest_mount_and_preview_never_translate() {
+        let mount = unit([0.6, 0.3, -0.4, 0.5]).unwrap();
+        for y_up in [false, true] { for direction in [-1., 1.] { for armed in [false, true] {
+            let mut e = engine(y_up, mount);
+            if !armed { e.disarm(); }
+            let up = if y_up { [0., 1., 0.] } else { [0., 0., 1.] };
+            for n in 2..702 {
+                let t = n as f64 * 0.01;
+                let yaw = direction * t * std::f64::consts::TAU / 6.;
+                let mut chest = mul(rotation(up, yaw), mount);
+                if n % 2 == 0 { chest = chest.map(|v| -v); }
+                e.update(2, chest, t).unwrap();
+                // Reproduce roll + impacts during the turn, with a qualifying opposite foot.
+                for side in 0..2 {
+                    let roll = ((t * 18.) + side as f64).sin() * 8_f64.to_radians();
+                    e.update(side, mul(mul(rotation(up, yaw), rotation([1., 0., 0.], roll)), mount), t).unwrap();
+                    e.update_acceleration(side, [3., 0., 0.], t).unwrap();
+                }
+                e.tick(t);
+                assert_eq!((e.speed, e.preview.speed), (0., 0.), "direction={direction} y_up={y_up} armed={armed} t={t}: {}", e.foot_motion_snapshot(t));
+            }
+            assert_eq!(e.armed, armed);
+        } } }
+    }
+    #[test]
+    fn either_foot_pivot_holds_across_opposite_qualified_support() {
+        let mut e = engine(false, IDENTITY);
+        for n in 2..400 {
+            let t = n as f64 * 0.01;
+            e.update(2, IDENTITY, t).unwrap();
+            let pivot_side = (n / 20) % 2;
+            for side in 0..2 {
+                let q = if side == pivot_side { rotation([0., 0., 1.], t * 4.) }
+                    else { rotation([1., 0., 0.], (t * 30.).sin() * 0.3) };
+                e.update(side, q, t).unwrap();
+                e.update_acceleration(side, [4., 0., 0.], t).unwrap();
+            }
+            e.tick(t);
+            if t > 0.25 {
+                assert!(e.pivot_suppressed, "alternating support escaped at {t}: {}", e.foot_motion_snapshot(t));
+                assert_eq!((e.speed, e.preview.speed), (0., 0.));
+            }
+        }
     }
     #[test]
     fn walking_to_pivot_stops_without_waiting_for_cadence_timeout() {
@@ -902,14 +988,16 @@ mod foot_intent_tests {
         assert!(e.armed && e.calibrated);
     }
     #[test]
-    fn settings_update_preserves_active_walk_and_rejects_invalid_values() {
+    fn settings_update_clears_activity_preserves_calibration_and_rejects_invalid_values() {
         let mut e = engine(false, IDENTITY);
         for n in 2..300 { let t = n as f64 * 0.01; stride(&mut e, t, 2.2, 25., 0.4, IDENTITY, false); }
-        let before = (e.speed, e.heading, e.cadence_state, e.steps.clone());
+        let before = (e.heading, e.cadence_state.steps, e.steps.clone());
         let mut settings = e.cfg.foot_motion.clone(); settings.min_swing_degrees = 3.;
         e.update_foot_motion_settings(settings).unwrap();
         assert!(e.armed && e.calibrated);
-        assert_eq!((e.speed, e.heading, e.cadence_state, e.steps.clone()), before);
+        assert_eq!((e.heading, e.cadence_state.steps, e.steps.clone()), before);
+        assert_eq!((e.speed, e.preview.speed, e.cadence_state.speed), (0., 0., 0.));
+        assert!(!e.pivot_suppressed);
         let mut invalid = e.cfg.foot_motion.clone(); invalid.pivot_ratio = f64::NAN;
         assert!(e.update_foot_motion_settings(invalid).is_err());
     }

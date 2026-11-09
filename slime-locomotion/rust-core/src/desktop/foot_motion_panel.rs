@@ -1,4 +1,4 @@
-//! A narrow live settings draft; this panel never stops or recenters movement.
+//! A narrow live settings draft; preserves calibration and the output arming state.
 use arcane_bridge_core::foot_motion::Settings;
 use eframe::egui;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ impl FootMotionPanel {
         if let Some((pending, sent)) = &self.pending {
             if online && pending == current {
                 self.pending = None;
-                self.notice = "Applied live. Center and game movement preserved.".into();
+                self.notice = "Applied live. Center preserved; step rhythm cleared.".into();
                 self.saved = current.clone();
                 self.draft = Some(settings.clone());
             } else if now - sent > 3. {
@@ -41,15 +41,16 @@ impl FootMotionPanel {
         }
         let mut command = None;
         egui::CollapsingHeader::new("Small steps & turning").id_salt("foot_motion_live").default_open(std::env::args().any(|arg|arg=="--qa-foot-motion-open")).show(ui, |ui| {
-            ui.small("Applies live without recentering or stopping game movement.");
+            ui.small("Applies live without recentering or changing whether game movement is enabled.");
+            ui.small("With the filter enabled, body turning pauses translation. Let your heading settle, then take new steps.");
             let draft = self.draft.as_mut().unwrap();
             ui.add_enabled_ui(online && !busy && self.pending.is_none(), |ui| {
                 let mut edited = ui.checkbox(&mut draft.enabled, "Filter foot pivots and tiny adjustments").changed();
                 ui.add_enabled_ui(draft.enabled, |ui| {
                     edited |= ui.add(egui::Slider::new(&mut draft.min_swing_degrees, 0.5..=8.).suffix("°").text("Minimum foot swing")).changed();
                     ui.small("Lower values allow smaller steps. Raise it to ignore tiny foot adjustments.");
-                    edited |= ui.add(egui::Slider::new(&mut draft.pivot_ratio, 1.0..=5.0).text("Turning tolerance")).changed();
-                    ui.small("Lower values reject more turning. Higher values allow more mixed swing and turn.");
+                    edited |= ui.add(egui::Slider::new(&mut draft.pivot_ratio, 1.0..=5.0).text("Foot turning tolerance")).changed();
+                    ui.small("Lower values reject more foot twisting. Body turning still pauses translation.");
                 });
                 if edited { self.notice.clear(); }
             });
@@ -76,7 +77,7 @@ impl FootMotionPanel {
             if !self.notice.is_empty() { ui.small(&self.notice); }
             if online {
                 if state["foot_motion"]["pivot_suppressed"] == true {
-                    ui.small("Turning detected: foot pivot ignored.");
+                    ui.small("Turning detected: translation stopped. Wait for your heading to settle.");
                 }
                 if let Some(feet) = state["foot_motion"]["feet"].as_array() {
                     let labels: Vec<_> = feet.iter().enumerate().filter_map(|(i, foot)| {
@@ -143,7 +144,7 @@ mod tests {
         let (_,text)=frame(&mut panel,&ctx,&state,true,vec![]);
         assert!(panel.pending.is_none());
         assert!(text.iter().any(|(t,_)|t.contains("Applied live")));
-        assert!(text.iter().any(|(t,_)|t.contains("foot pivot ignored")));
+        assert!(text.iter().any(|(t,_)|t.contains("translation stopped")));
     }
     #[test]
     fn offline_apply_and_non_cadence_cannot_emit_commands() {

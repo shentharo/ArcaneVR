@@ -7,6 +7,10 @@ use std::collections::VecDeque;
 const WINDOW: f64 = 0.15;
 const READING_AGE: f64 = 0.12;
 pub(crate) const PIVOT_STOP_CONFIRMATION: f64 = 0.12;
+const BODY_TURN_WINDOW: f64 = 0.12;
+const BODY_TURN_MIN_DEGREES: f64 = 1.2;
+const BODY_TURN_RATE: f64 = 18.;
+const TURN_HOLD: f64 = 0.45;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -66,9 +70,64 @@ pub struct Evidence {
     pub ready: bool,
 }
 #[derive(Clone, Debug, Default)]
-pub struct Guard { feet: [Foot; 2] }
+pub struct Guard {
+    feet: [Foot; 2],
+    body_previous: Option<(Q, f64)>,
+    body_poses: VecDeque<(f64, f64)>,
+    body_yaw: f64,
+    body_rate: f64,
+    body_hold_until: Option<f64>,
+    pivot_since: Option<f64>,
+    pivot_hold_until: Option<f64>,
+}
 impl Guard {
     pub fn clear(&mut self) { *self = Self::default(); }
+    /// Successive world-space twists cancel the arbitrary physical sensor mount.
+    /// Accumulation also handles +/-pi wrap and either quaternion representation.
+    pub fn body_orientation(&mut self, q: Q, t: f64, y_up: bool) {
+        if !t.is_finite() { return; }
+        let Ok(q) = unit(q) else { return; };
+        if let Some((previous, at)) = self.body_previous {
+            if t <= at { return; }
+            if t - at > BODY_TURN_WINDOW {
+                self.body_poses.clear();
+                self.body_yaw = 0.;
+            } else {
+                let up = if y_up { [0., 1., 0.] } else { [0., 0., 1.] };
+                if let Some(delta) = crate::mounting::heading(q, previous, up) {
+                    self.body_yaw += delta.to_degrees();
+                }
+            }
+        }
+        self.body_previous = Some((q, t));
+        self.body_rate = 0.;
+        self.body_poses.retain(|(at, _)| t - at <= BODY_TURN_WINDOW);
+        for &(at, yaw) in &self.body_poses {
+            let delta = self.body_yaw - yaw;
+            let rate = delta / (t - at);
+            if rate.abs() > self.body_rate.abs() { self.body_rate = rate; }
+            if delta.abs() >= BODY_TURN_MIN_DEGREES && rate.abs() >= BODY_TURN_RATE {
+                self.body_hold_until = Some(t + TURN_HOLD);
+            }
+        }
+        self.body_poses.push_back((t, self.body_yaw));
+        while self.body_poses.len() > 512 { self.body_poses.pop_front(); }
+    }
+    fn holding(until: Option<f64>, t: f64) -> bool {
+        t.is_finite() && until.is_some_and(|until| t < until)
+    }
+    /// A convincing pivot on either foot holds across alternating support. A
+    /// rolling opposite foot cannot override a torso turn or a latched pivot.
+    pub fn translation_blocked(&mut self, t: f64, settings: &Settings) -> bool {
+        if !settings.enabled || !t.is_finite() { return false; }
+        if (0..2).any(|side| self.evidence(side, t, settings).pivot) {
+            let since = *self.pivot_since.get_or_insert(t);
+            if t >= since && t - since >= PIVOT_STOP_CONFIRMATION {
+                self.pivot_hold_until = Some(t + TURN_HOLD);
+            }
+        } else { self.pivot_since = None; }
+        Self::holding(self.body_hold_until, t) || Self::holding(self.pivot_hold_until, t)
+    }
     pub fn orientation(&mut self, side: usize, q: Q, tilt: f64, t: f64, y_up: bool) {
         if side >= 2 || !t.is_finite() || !tilt.is_finite() { return; }
         let Ok(q) = unit(q) else { return; };
@@ -151,7 +210,19 @@ impl Guard {
             json!({"swing_degrees":e.swing_degrees,"yaw_degrees":e.yaw_degrees,"qualified":e.qualified,
                 "pivot":e.pivot,"fresh":e.fresh,"ready":e.ready,"reason":reason})
         }).collect();
-        json!({"settings":settings.to_json(),"feet":feet,"pivot_suppressed":suppressed,"window_seconds":WINDOW,"evidence_delay_seconds":0.06,"pivot_stop_confirmation_seconds":PIVOT_STOP_CONFIRMATION})
+        let body_hold = self.body_hold_until.map_or(0., |until| (until - t).max(0.));
+        let pivot_hold = self.pivot_hold_until.map_or(0., |until| (until - t).max(0.));
+        let body_fresh = self.body_previous.is_some_and(|(_, at)| t >= at && t - at <= READING_AGE);
+        let reason = if !settings.enabled { "disabled" }
+            else if body_hold > 0. { "body turn quiet hold" }
+            else if pivot_hold > 0. { "foot pivot quiet hold" }
+            else if !body_fresh { "waiting for fresh torso orientation" }
+            else { "translation allowed" };
+        json!({"settings":settings.to_json(),"feet":feet,"pivot_suppressed":suppressed,"window_seconds":WINDOW,"evidence_delay_seconds":0.06,"pivot_stop_confirmation_seconds":PIVOT_STOP_CONFIRMATION,
+            "body_turn":{"reason":reason,"fresh":body_fresh,"yaw_rate_degrees_per_second":if body_fresh {self.body_rate} else {0.},
+                "hold_seconds":body_hold,"pivot_hold_seconds":pivot_hold,"suppressed":suppressed,
+                "rate_threshold_degrees_per_second":BODY_TURN_RATE,"minimum_degrees":BODY_TURN_MIN_DEGREES,
+                "window_seconds":BODY_TURN_WINDOW,"quiet_hold_seconds":TURN_HOLD}})
     }
 }
 

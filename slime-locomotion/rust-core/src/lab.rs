@@ -2270,7 +2270,11 @@ mod tests {
         let settings=json!({"enabled":true,"min_swing_degrees":1.5,"pivot_ratio":2.8});
         lab.command(&json!({"command":"foot_motion_settings","settings":settings}),1.).unwrap();
         assert!(lab.engine.armed && lab.engine.calibrated && lab.walking);
-        assert_eq!(lab.engine.speed,0.43); assert_eq!(lab.engine.heading,0.75); assert_eq!(lab.heading,0.75);
+        // Changing the filter forgets pre-change step activity while preserving
+        // calibration and the user's explicit output arming choice.
+        assert_eq!(lab.engine.speed,0.); assert_eq!(lab.engine.preview.speed,0.);
+        assert_eq!(lab.engine.cadence_state.speed,0.);
+        assert_eq!(lab.engine.heading,0.75); assert_eq!(lab.heading,0.75);
         assert_eq!(lab.generation,generation); assert_eq!(lab.travel_xy,[0.2,0.3]); assert_eq!(lab.turn_xy,[0.1,0.]); assert_eq!(lab.output_buttons,2);
         assert_eq!(lab.ack_seen,1.); assert_eq!(lab.ack_flags,7); assert!(!lab.neutral_pending);
         assert_eq!(lab.snapshot(1.)["actions"],before["actions"]);
