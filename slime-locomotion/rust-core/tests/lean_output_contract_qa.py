@@ -36,7 +36,8 @@ env.update(ARCANEVR_EMBED_QA='1',
            ARCANEVR_EMBED_QA_REPORT=str(OUT / 'embed.json'),
            ARCANEVR_VIEWER_QA_SCREENSHOT=str(OUT / 'renderer.png'),
            ARCANEVR_VIEWER_QA_REPORT=str(OUT / 'renderer.json'),
-           ARCANEVR_VIEWER_QA_SERIES=str(OUT / 'series.jsonl'))
+           ARCANEVR_VIEWER_QA_SERIES=str(OUT / 'series.jsonl'),
+           ARCANEVR_VIEWER_QA_REPORT_AFTER='22')
 base = 'http://127.0.0.1:18825/api/'
 
 def state():
