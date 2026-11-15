@@ -42,7 +42,7 @@ impl FootMotionPanel {
         let mut command = None;
         egui::CollapsingHeader::new("Small steps & turning").id_salt("foot_motion_live").default_open(std::env::args().any(|arg|arg=="--qa-foot-motion-open")).show(ui, |ui| {
             ui.small("Applies live without recentering or changing whether game movement is enabled.");
-            ui.small("With the filter enabled, body turning pauses translation. Let your heading settle, then take new steps.");
+            ui.small("With the filter enabled, a step where the foot twists to follow a turn does not move you. Walking steps count again about half a second after the turn.");
             let draft = self.draft.as_mut().unwrap();
             ui.add_enabled_ui(online && !busy && self.pending.is_none(), |ui| {
                 let mut edited = ui.checkbox(&mut draft.enabled, "Filter foot pivots and tiny adjustments").changed();
@@ -50,7 +50,7 @@ impl FootMotionPanel {
                     edited |= ui.add(egui::Slider::new(&mut draft.min_swing_degrees, 0.5..=8.).suffix("°").text("Minimum foot swing")).changed();
                     ui.small("Lower values allow smaller steps. Raise it to ignore tiny foot adjustments.");
                     edited |= ui.add(egui::Slider::new(&mut draft.pivot_ratio, 1.0..=5.0).text("Foot turning tolerance")).changed();
-                    ui.small("Lower values reject more foot twisting. Body turning still pauses translation.");
+                    ui.small("Lower values treat more foot twisting as turning. Chest sway alone never pauses walking.");
                 });
                 if edited { self.notice.clear(); }
             });
@@ -77,7 +77,7 @@ impl FootMotionPanel {
             if !self.notice.is_empty() { ui.small(&self.notice); }
             if online {
                 if state["foot_motion"]["pivot_suppressed"] == true {
-                    ui.small("Turning detected: translation stopped. Wait for your heading to settle.");
+                    ui.small("Turning step detected: translation paused until your feet stop twisting.");
                 }
                 if let Some(feet) = state["foot_motion"]["feet"].as_array() {
                     let labels: Vec<_> = feet.iter().enumerate().filter_map(|(i, foot)| {
@@ -144,7 +144,7 @@ mod tests {
         let (_,text)=frame(&mut panel,&ctx,&state,true,vec![]);
         assert!(panel.pending.is_none());
         assert!(text.iter().any(|(t,_)|t.contains("Applied live")));
-        assert!(text.iter().any(|(t,_)|t.contains("translation stopped")));
+        assert!(text.iter().any(|(t,_)|t.contains("translation paused")));
     }
     #[test]
     fn offline_apply_and_non_cadence_cannot_emit_commands() {

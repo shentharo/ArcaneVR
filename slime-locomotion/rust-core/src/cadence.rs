@@ -80,14 +80,53 @@ pub struct Cadence {
     chain_steps: usize,
     speed: f64,
     last_tick: Option<f64>,
+    /// When set, a detected step waits in `pending` until `commit` or `reject`.
+    deferred: bool,
+    pending: [Option<f64>; 2],
 }
 impl Cadence {
+    /// Deferred steps let the caller check what the foot does next (for example
+    /// twisting to follow a turn) before the step is allowed to drive speed.
+    pub fn set_deferred(&mut self, deferred: bool) {
+        self.deferred = deferred;
+        if !deferred { self.pending = [None; 2]; }
+    }
+    /// The time a not-yet-counted step began on this foot.
+    pub fn pending(&self, foot: usize) -> Option<f64> {
+        self.pending.get(foot).copied().flatten()
+    }
+    /// Count a pending step at the time it began, so waiting never distorts rhythm.
+    pub fn commit(&mut self, foot: usize) -> bool {
+        let Some(t) = self.pending.get_mut(foot).and_then(Option::take) else { return false; };
+        self.feet[foot].steps += 1;
+        self.step(t, foot);
+        true
+    }
+    /// Discard a pending step: it was not a walking step.
+    pub fn reject(&mut self, foot: usize) -> bool {
+        self.pending.get_mut(foot).and_then(Option::take).is_some()
+    }
+    /// Forget the walk in progress and stop at once, but keep following each
+    /// foot's activity and any step still being checked.
+    pub fn quiet(&mut self) {
+        self.halt();
+        self.speed = 0.;
+    }
+    /// Forget the walk in progress but let speed ease out instead of snapping to
+    /// zero. Used when the feet turn out to be turning rather than walking.
+    pub fn halt(&mut self) {
+        self.intervals.clear();
+        self.last_step = None;
+        self.chain_steps = 0;
+    }
+
     /// Forget the walk in progress and the output speed. Learned step sizes are kept.
     pub fn stop(&mut self) {
         self.intervals.clear();
         self.last_step = None;
         self.chain_steps = 0;
         self.speed = 0.;
+        self.pending = [None; 2];
         for f in &mut self.feet {
             f.active = false;
             f.peak = 0.;
@@ -95,7 +134,7 @@ impl Cadence {
     }
     /// Forget everything, including learned step sizes.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self { deferred: self.deferred, ..Self::default() };
     }
     pub fn tilt(&mut self, foot: usize, rate: f64, t: f64) {
         if foot < 2 && rate.is_finite() && t.is_finite() {
@@ -148,6 +187,11 @@ impl Cadence {
         f.active_since = t;
         f.peak = activity;
         f.last_step = Some(t);
+        if self.deferred {
+            // A new pulse while the previous one is undecided is the same movement.
+            self.pending[side].get_or_insert(t);
+            return;
+        }
         f.steps += 1;
         self.step(t, side);
     }
@@ -197,7 +241,10 @@ impl Cadence {
         self.last_tick = Some(t);
         let (mut target, mut rate) = (0., 0.);
         if let Some((last, _)) = self.last_step {
-            let since = t - last;
+            // A step still being checked has not been missed: without this, the
+            // wait for its verdict would read as the walker slowing down.
+            let waiting = self.pending.iter().flatten().fold(last, |a, b| a.max(*b));
+            let since = t - if self.intervals.is_empty() { last } else { waiting.min(t) };
             match self.typical_interval() {
                 None if since <= 0.8 => target = START_SPEED,
                 Some(interval) if since <= (interval * 1.4).clamp(0.55, 1.1) => {
@@ -369,6 +416,72 @@ mod tests {
         assert_eq!(c.tick(f64::NAN).speed, 0.);
         assert_eq!(c.tick(1.).speed, 0.);
         assert_eq!(c.tick(0.5).speed, 0.);
+    }
+}
+
+#[cfg(test)]
+mod deferred_steps {
+    use super::*;
+    /// One foot pulse: activity rises at `t` and falls 0.1 s later.
+    fn pulse(c: &mut Cadence, side: usize, t: f64) {
+        c.sample(side, 4., Some(t), 0., None, t);
+        c.sample(side, 0., Some(t + 0.1), 0., None, t + 0.1);
+    }
+    #[test]
+    fn a_late_verdict_gives_the_same_rhythm_as_an_immediate_step() {
+        let (mut waiting, mut direct) = (Cadence::default(), Cadence::default());
+        waiting.set_deferred(true);
+        for n in 0..12 {
+            let (t, side) = (1. + n as f64 * 0.5, n % 2);
+            pulse(&mut direct, side, t);
+            pulse(&mut waiting, side, t);
+            assert_eq!(waiting.pending(side), Some(t));
+            for k in 1..=50 {
+                let now = t + k as f64 * 0.01;
+                // The verdict arrives 0.25 s after the step began.
+                if k == 25 { assert!(waiting.commit(side)); }
+                let (a, b) = (direct.tick(now), waiting.tick(now));
+                if n >= 3 && k > 25 {
+                    assert_eq!(a.steps, b.steps);
+                    assert!((a.rate - b.rate).abs() < 1e-9, "rate {} vs {} at {now}", a.rate, b.rate);
+                }
+                if n >= 3 { assert!(b.target > 0.2, "waiting for a verdict slowed walking at {now}"); }
+            }
+        }
+        assert!(waiting.tick(7.).speed > 0.3);
+    }
+    #[test]
+    fn rejected_steps_never_move_and_halt_eases_out() {
+        let mut c = Cadence::default();
+        c.set_deferred(true);
+        for n in 0..10 {
+            let (t, side) = (1. + n as f64 * 0.5, n % 2);
+            pulse(&mut c, side, t);
+            assert!(c.reject(side));
+            assert!(!c.commit(side));
+            assert_eq!(c.tick(t + 0.3).speed, 0.);
+        }
+        assert_eq!(c.tick(7.).steps, [0, 0]);
+        for n in 0..10 {
+            let (t, side) = (8. + n as f64 * 0.5, n % 2);
+            pulse(&mut c, side, t);
+            c.commit(side);
+            for k in 1..50 { c.tick(t + k as f64 * 0.01); }
+        }
+        let before = c.tick(13.).speed;
+        assert!(before > 0.3);
+        c.halt();
+        let after = c.tick(13.01).speed;
+        assert!(after > 0. && after < before, "halt should ease out: {before} -> {after}");
+        for k in 2..60 { c.tick(13. + k as f64 * 0.01); }
+        assert_eq!(c.tick(13.6).speed, 0.);
+        // Stopping forgets undecided steps; switching the mode off does too.
+        pulse(&mut c, 0, 14.);
+        c.stop();
+        assert_eq!(c.pending(0), None);
+        pulse(&mut c, 1, 15.);
+        c.set_deferred(false);
+        assert_eq!(c.pending(1), None);
     }
 }
 

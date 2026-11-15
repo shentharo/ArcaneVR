@@ -1710,6 +1710,9 @@ impl Lab {
         if self.engine.cfg.chest_steps && self.walking_model["identity"].as_str()==identity.as_deref() && identity.is_some() && self.walking_learning.is_none() {
             if let Some(a)=angles.filter(|_|t>=seen && t-seen<0.25) {self.walking_signal.add(seen,a[0]);let(rate,turns)=self.walking_signal.measure();if turns>=2 {if let Some(learned)=self.walking_model["rate"].as_f64().filter(|r|*r>0.02){self.walking_effort=(rate/(learned*self.walking_model["full_speed_effort"].as_f64().unwrap_or(0.5).clamp(0.1,2.))).max(0.);self.walking_speed=self.walking_effort.min(1.);}}}else{self.walking_signal=Default::default();}
         }
+        // Turning on the spot sways the chest like walking does; the chest's own
+        // heading tells the two apart.
+        let turning=self.engine.chest_turn_factor(t);self.walking_speed*=turning;self.walking_effort*=turning;
 
         self.gesture_preview = Default::default();
         let is_tilt = self.movement_engine != "chest_heading_steps";
@@ -2127,6 +2130,7 @@ impl Lab {
         result["mounting_calibration"] = json!({"valid":self.mounting_valid(t),"tracker_identity":self.current_mounting_identity(t),"learned_identity":self.learned_mounting_identity,"mapping":self.learned_mounting_identity.as_ref().and_then(|id|self.device_mountings.get(id)),"message":if self.mounting_valid(t) {""} else {"Sensor calibration required for this chest tracker"}});
         result["game_profiles"] = self.game_profiles.clone();
         result["foot_motion"] = self.engine.foot_motion_snapshot(t);
+        result["chest_turn"] = self.engine.chest_turn_snapshot(t);
         result["calibration_epoch"] = json!(self.calibration_epoch);
         result["head_recenter"] = self.head_recenter.snapshot();
         result["head_recenter"]["settings"] = self.head_recenter.settings().to_json();

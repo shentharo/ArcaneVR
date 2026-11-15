@@ -304,12 +304,14 @@ def synthetic(args, original):
             rows = s.sample('run', 2., rate=math.radians(8), settle=.6)
             assert sum(r['magnitude'] for r in rows)/len(rows) > .65, 'Gentle curve stopped walking'
             checks.append({'phase': 'gentle_curve_8deg_per_s', 'mean_output': sum(r['magnitude'] for r in rows)/len(rows)})
-            # First detected body rotation must immediately stop an already running gait.
+            # A running gait must stop once the feet have visibly twisted with the turn.
+            # 1.1.21 judges foot twist per step instead of any chest movement, so the
+            # stop takes up to about half a second at 90 degrees per second.
             start = time.monotonic()
-            rows = s.sample('pivot', .65, rate=math.radians(90), settle=0.)
+            rows = s.sample('pivot', 1.2, rate=math.radians(90), settle=0.)
             first_zero = next((r['at']-start for r in rows if r['magnitude'] < .001), None)
-            assert first_zero is not None and first_zero < .16, ('walk-to-turn latency', first_zero)
-            assert max(r['magnitude'] for r in rows if r['at']-start > .16) < .001
+            assert first_zero is not None and first_zero < .7, ('walk-to-turn latency', first_zero)
+            assert max(r['magnitude'] for r in rows if r['at']-start > .7) < .001
             checks.append({'phase': 'walk_to_turn', 'stop_latency_seconds': first_zero})
             for name, rate, mode in [('clockwise_full_rotation', 90., 'pivot'),
                                      ('counterclockwise_full_rotation', -90., 'opposite-qualified')]:
