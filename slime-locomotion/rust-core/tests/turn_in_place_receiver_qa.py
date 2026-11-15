@@ -118,14 +118,35 @@ class Session:
         self.ready.wait()
         self.hello()
         last = time.monotonic()
+        turning_key, turning_start, turning_heading = None, 0., 0.
         while not self.halt.is_set():
             now = time.monotonic()
             dt, last = now-last, now
             p = self.phase
             p['yaw'] += p['rate']*dt
+            key = (p['mode'], p['rate'])
+            if key != turning_key:
+                turning_key, turning_start, turning_heading = key, now, p['yaw']
             if p['mode'] != 'stale':
                 for i in range(3):
                     yaw, tilt, acc = p['yaw'], 0., 0.
+                    if i < 2 and p['mode'] == 'stepping-turn':
+                        # Match the recorded alternating turn: planted feet hold
+                        # heading; each lifted foot twists to catch up. The old
+                        # opposite-qualified fixture repeatedly walked one foot
+                        # at world yaw zero for the whole rotation, so it was a
+                        # mixed walk/pivot input, not a stationary full turn.
+                        local = now - turning_start - i * .5
+                        count, phase = max(0., math.floor(local)), local % 1.
+                        steps = 0. if local < 0. else count
+                        if local >= 0. and phase < .6:
+                            f = phase / .6
+                            steps += f*f*(3.-2.*f)
+                            tilt = math.radians(15)*math.sin(f*math.pi)
+                            acc = 4.
+                        elif local >= 0.:
+                            steps += 1.
+                        yaw = turning_heading + steps*p['rate']
                     if p['mode'] == 'lean' and i == 2:
                         x, y, z = p['tilt']
                         angle = math.sqrt(x*x+y*y+z*z)
@@ -236,6 +257,7 @@ class Session:
             rows.append({'at': time.monotonic(), 'magnitude': math.hypot(*xy),
                 'heading': v['heading'], 'foot_motion': v['foot_motion'], 'travel_xy': xy})
             time.sleep(.025)
+        (self.out/'last-state.json').write_text(json.dumps(v, indent=2))
         return rows
 
     def renderer_latest(self):
@@ -313,8 +335,8 @@ def synthetic(args, original):
             assert first_zero is not None and first_zero < .7, ('walk-to-turn latency', first_zero)
             assert max(r['magnitude'] for r in rows if r['at']-start > .7) < .001
             checks.append({'phase': 'walk_to_turn', 'stop_latency_seconds': first_zero})
-            for name, rate, mode in [('clockwise_full_rotation', 90., 'pivot'),
-                                     ('counterclockwise_full_rotation', -90., 'opposite-qualified')]:
+            for name, rate, mode in [('clockwise_full_rotation', 90., 'stepping-turn'),
+                                     ('counterclockwise_full_rotation', -90., 'stepping-turn')]:
                 rows = s.sample(mode, 4.25, rate=math.radians(rate), settle=.3)
                 assert max(r['magnitude'] for r in rows) < .001, name
                 # Heading wrap itself must be crossed, not merely simulated in labels.
@@ -338,14 +360,19 @@ def synthetic(args, original):
             time.sleep(.7)
             s.command('movement_engine', engine='body_tilt')
             settings = s.state()['actions']['settings']
-            settings['direction'].update(enabled=True, decouple=False, strafe_enabled=True,
+            settings['direction'].update(enabled=True, decouple=False, strafe_enabled=True, forward_only=False,
                 heading_strafe_enabled=False, learned_forward=[1.,0.,0.], learned_right=[0.,1.,0.],
                 pitch_sign=1., roll_sign=1., smoothing_ms=0., max_angle=.4,
                 horizontal_max_angle=.4, forward_max_angle=.4, forward_offset=0., sprint_angle=.6,
                 deadzone=.05, forward_deadzone=.05, backward_deadzone=.05,
                 left_deadzone=.05, right_deadzone=.05)
             s.command('actions_settings', settings=settings)
+            # The Test page queues its own recenter when a mode/settings change
+            # invalidates calibration. Let that queue settle at neutral before
+            # presenting directional poses, rather than centering on a lean.
+            s.sample('still', 2.5, settle=0.)
             s.calibrate()
+            s.sample('still', .5, settle=0.)
             s.phase['mode'] = 'lean'
             for name, pose, axis, sign, world_axis, world_sign in [
                 ('forward', [.35,0.,0.], 1,1,2,-1), ('backward', [-.35,0.,0.],1,-1,2,1),
